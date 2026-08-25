@@ -1,0 +1,14 @@
+certstream
+google-cloud-pubsub
+google-cloud-firestore
+Levenshtein
+beautifulsoup4
+requests
+google-genai
+pydantic-settings
+pytest
+pytest-asyncio
+opentelemetry-api
+opentelemetry-sdk
+opentelemetry-exporter-otlp-proto-grpc
+opentelemetry-resourcedetector-gcp

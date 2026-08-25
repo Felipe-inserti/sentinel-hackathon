@@ -1,0 +1,35 @@
+# Segredos / config local — nunca commitar
+.env
+.env.*.local
+*.env.local
+
+# Credenciais GCP (service account keys, ADC exportadas etc.)
+*.json.key
+service-account*.json
+credentials*.json
+gcloud-key*.json
+*-key.json
+
+# Ambientes virtuais Python (qualquer variação de nome)
+venv/
+.venv/
+.venv*/
+env/
+ENV/
+
+# Caches / artefatos Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+
+# Claude Code — config local pessoal, não compartilhar
+.claude/settings.local.json
