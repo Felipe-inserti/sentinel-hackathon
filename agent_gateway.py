@@ -619,8 +619,13 @@ def create_app(gateway: AgentGateway | None = None) -> FastAPI:
             status_code=_STAGE_HTTP_STATUS[exc.stage], content=body.model_dump(mode="json")
         )
 
-    @app.get("/healthz")
-    async def healthz() -> dict[str, str]:
+    # NAO "/healthz" -- reproduzido em producao (Sprint 8, sessao de
+    # validacao de 48h): o Google Frontend do Cloud Run intercepta esse
+    # path especifico para o proprio probe de plataforma e a requisicao
+    # NUNCA chega ao FastAPI (sem log nenhum deste processo, sem jeito de
+    # depurar por dentro da aplicacao). "/readyz" nao tem esse conflito.
+    @app.get("/readyz")
+    async def readyz() -> dict[str, str]:
         return {"status": "ok"}
 
     @app.get("/agents", response_model=list[AgentSummary])

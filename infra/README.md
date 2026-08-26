@@ -60,19 +60,44 @@ para calcular o `plan`, mesmo que nenhum recurso ainda exista.
 | Service Account | Pode fazer | Papel IAM | Escopo | Não pode fazer |
 |---|---|---|---|---|
 | `ct-listener-sa` | Publicar domínio suspeito | `roles/pubsub.publisher` | tópico `suspicious-domain-detected` | Ler/escrever Firestore, chamar Vertex AI, publicar em qualquer outro tópico |
+| | Exportar traces/métricas (`telemetry.py`) ³ | `roles/cloudtrace.agent`, `roles/monitoring.metricWriter` | projeto inteiro¹ | — |
 | `orchestrator-sa` | Consumir domínio suspeito | `roles/pubsub.subscriber` | subscription `sub-orchestrator` | — |
 | | Ler/gravar investigações e métricas | `roles/datastore.user` | projeto inteiro¹ | — |
 | | Classificar com Gemini | `roles/aiplatform.user` | projeto inteiro | — |
 | | Publicar investigação concluída | `roles/pubsub.publisher` | tópico `investigation-completed` | Publicar em `takedown-approved`, aprovar takedown |
+| | Exportar traces/métricas (`telemetry.py`) ³ | `roles/cloudtrace.agent`, `roles/monitoring.metricWriter` | projeto inteiro¹ | — |
 | `evidence-sa` | Consumir investigação concluída | `roles/pubsub.subscriber` | subscription `sub-evidence` | Publicar em qualquer tópico Pub/Sub, chamar Vertex AI |
 | | Gravar evidência (screenshot/HTML sanitizado) | `roles/storage.objectAdmin` | bucket `<project_id>-sentinel-evidence` | — |
 | | Ler/gravar Firestore | `roles/datastore.user` | projeto inteiro¹ | — |
+| | Exportar traces/métricas (`telemetry.py`) ³ | `roles/cloudtrace.agent`, `roles/monitoring.metricWriter` | projeto inteiro¹ | — |
 | `takedown-sa` | Consumir aprovação de takedown | `roles/pubsub.subscriber` | subscription `sub-takedown` | Publicar em qualquer tópico Pub/Sub (nunca publica nada) |
 | | Reconfirmar aprovação, auditar, rate limit | `roles/datastore.user` | projeto inteiro¹ ² | — |
 | | Decidir canais / redigir notificação com Gemini | `roles/aiplatform.user` | projeto inteiro | — |
+| | Exportar traces/métricas (`telemetry.py`) ³ | `roles/cloudtrace.agent`, `roles/monitoring.metricWriter` | projeto inteiro¹ | — |
 | `dashboard-sa` | Ler/gravar investigações (decisão humana: `approved_by`/`decision_rationale`/etc.) e métricas | `roles/datastore.user` | projeto inteiro¹ | Chamar Vertex AI, escrever no bucket de evidência |
 | | Ler artefatos de evidência (proxy de screenshot/HTML pro dashboard) | `roles/storage.objectViewer` | bucket `<project_id>-sentinel-evidence` | — |
 | | Publicar aprovação de takedown | `roles/pubsub.publisher` | tópico `takedown-approved` | — |
+| | Exportar traces/métricas ³ | `roles/cloudtrace.agent`, `roles/monitoring.metricWriter` | projeto inteiro¹ | — |
+| `gateway-sa` (Sprint 8B) | Rotear invocação de `orchestrator`/`evidence-collector` | `roles/pubsub.publisher` | tópicos `suspicious-domain-detected` e `investigation-completed` | Publicar em `takedown-approved` (NUNCA — ver decisão abaixo), chamar Vertex AI |
+| | Ler registry, gravar log de auditoria/rate limit do gateway | `roles/datastore.user` | projeto inteiro¹ | — |
+
+³ Adicionado depois de uma sessão de validação de 48h (Sprint 8) que achou
+as 5 SAs deste arquivo (`ct-listener-sa`/`orchestrator-sa`/`evidence-sa`/
+`takedown-sa`/`dashboard-sa`) SEM `roles/cloudtrace.agent`/
+`roles/monitoring.metricWriter` — `telemetry.py` estava funcionalmente
+correto (inclusive a propagação de `trace_id` pelo Pub/Sub), mas toda
+tentativa de exportar span/métrica falhava com `PERMISSION_DENIED` em
+`telemetry.traces.write`/`monitoring.timeSeries.create`, silenciosamente
+(ver `telemetry.py::_try_build_span_processor`/`_try_build_metric_reader`,
+best-effort por design — loga e segue, nunca derruba o processo). Só 4
+processos chamam `telemetry.setup()` hoje (`ct_listener.py`/
+`orchestrator.py`/`evidence_agent.py`/`takedown_agent.py`) — `dashboard-sa`
+(Next.js, sem instrumentação OTel neste sprint) não emite telemetria ainda,
+mas ganhou o mesmo papel por consistência das 5 SAs deste arquivo (custo
+zero: um papel de projeto sem chamada correspondente no código não gera
+escrita nenhuma). `gateway-sa` fica de fora desta correção — `agent_gateway.py`
+também não chama `telemetry.setup()` ainda, mesma lacuna, fora do escopo
+pontual desta correção.
 
 ¹ `roles/datastore.user`/`roles/datastore.viewer` são papéis de **projeto**
 — o Firestore nativo não oferece IAM por coleção/documento sem regras de
@@ -159,3 +184,130 @@ efeito. Por isso a matriz de IAM da Parte B NÃO deve incluir
 exatamente como documentado na seção acima. A garantia topológica
 original permanece intacta; o gateway não é "mais uma camada" dela, é um
 caminho que foi conscientemente deixado de fora.
+
+## Sprint 8, Parte B — Deploy (Cloud Run)
+
+Arquivos novos: `apis.tf`, `artifact_registry.tf`, `cloud_run_gateway.tf`,
+`cloud_run_jobs.tf`, `budget.tf`, mais variáveis/outputs adicionados
+(nunca removidos) em `variables.tf`/`outputs.tf`. Nenhum recurso do
+`main.tf` original foi alterado.
+
+### Por que Jobs sob demanda, não Services, para os 4 workers
+
+`ct_listener.py`/`orchestrator.py`/`evidence_agent.py`/`takedown_agent.py`
+são todos processos "conecte e rode para sempre" — um websocket
+(`certstream`) ou um `subscribe()` de streaming do Pub/Sub — **sem
+nenhum servidor HTTP**. Cloud Run Service só escala (inclusive escalar a
+zero de verdade) em resposta a requisições HTTP recebidas; sem um
+endpoint para receber tráfego, um Service desses processos ficaria preso
+em `min-instances=1` para sempre (ou nunca receberia tráfego nenhum) —
+adicionar um endpoint `/healthz` só para satisfazer esse contrato seria
+mudar código de aplicação fora do escopo "aditivo" deste sprint.
+
+Cloud Run **Job** é o primitivo certo para um processo de longa duração
+sem HTTP: você `execute` uma instância dele quando precisa, ela roda até
+terminar/ser cancelada/bater o timeout, e — confirmado contra a
+documentação oficial nesta sessão — **não há cobrança nenhuma entre
+execuções**, só durante o tempo em que uma execução está de fato rodando.
+Isso é o que torna "custo perto de zero fora da janela de demo" possível
+sem tocar em nenhuma linha dos 4 agentes.
+
+### Limitação honesta do `ct-listener-job`: NÃO é cobertura 24/7
+
+Diferente de `orchestrator-job`/`evidence-collector-job`/
+`takedown-agent-job` — que consomem de uma subscription Pub/Sub própria,
+e o Pub/Sub **retém a mensagem** (`message_retention_duration=86400s`,
+até 1 dia) enquanto nenhum worker está rodando para consumi-la, então
+"job desligado" não perde nada, só atrasa o processamento —
+`ct-listener-job` conecta a um **feed público efêmero de terceiros**
+(`certstream.calidog.io`, via websocket). Não existe replay: um
+certificado que passa pelo stream enquanto o job não está executando é
+**perdido para sempre**, não fica esperando em fila em lugar nenhum.
+
+Isso significa que este projeto, deployado como está, **não monitora
+Certificate Transparency continuamente**. Ele captura domínios suspeitos
+de verdade só durante as janelas em que você roda
+`gcloud run jobs execute ct-listener-job` (demo, gravação, teste manual).
+Fora dessas janelas, o pipeline de detecção fica parado — não é uma
+simulação nem dado fake quando está rodando (o certstream é real, o
+prefiltro e a triagem são reais), mas a cobertura no tempo é
+intencionalmente parcial, por decisão de custo (ver Parte B do Sprint 8).
+
+Cobertura contínua de verdade exigiria um worker sempre ativo (Cloud Run
+Service com `min-instances=1` permanente, ou uma VM/GKE) — cogitado e
+descartado para este sprint: custaria ~US$5-15/mês rodando 24/7 mesmo
+sem tráfego nenhum de certificados maliciosos, e exigiria adicionar um
+endpoint HTTP trivial a `ct_listener.py` só para caber no contrato de
+Cloud Run Service (mudança de código de aplicação, fora do escopo deste
+sprint sem aprovação explícita). Se isso virar um requisito real, o
+próximo passo é exatamente esse: endpoint `/readyz` (**não** `/healthz` —
+ver nota abaixo, seção "Testando o agent-gateway") + Service com
+`min-instances=1`, revisado à parte.
+
+### Uso — `deploy.sh` / `teardown.sh`
+
+```bash
+./deploy.sh <PROJECT_ID> [REGION]      # builda imagens, aplica Terraform (com confirmação do plan)
+gcloud run jobs execute ct-listener-job --project <PROJECT_ID> --region <REGION> --async
+# ... grave a demo ...
+./teardown.sh <PROJECT_ID> [REGION]    # cancela execuções de Job ainda rodando, confirma min-instances=0
+```
+
+### Testando o agent-gateway
+
+`GET /readyz` não exige autenticação (readiness do Cloud Run — **não**
+`/healthz`: reproduzido em produção nesta sessão de validação, o Google
+Frontend do Cloud Run intercepta esse path específico para o probe da
+própria plataforma e a requisição nunca chega ao FastAPI, então qualquer
+`curl`/monitoramento contra `/healthz` bate 404/comportamento do Frontend,
+não do `agent_gateway.py`). Todo o resto exige um ID token do Google —
+`agent_gateway.py::verify_google_id_token` usa a claim `email` do token
+como identidade do chamador, então o token **precisa** ser emitido com
+essa claim:
+
+```bash
+GATEWAY_URL="$(cd infra && terraform output -raw gateway_url)"
+
+curl "${GATEWAY_URL}/readyz"
+
+# --include-email e OBRIGATORIO -- sem ela o token do gcloud NAO carrega a
+# claim "email", e verify_google_id_token rejeita com "ID token valido, mas
+# sem claim 'email'" (401, etapa "authentication"). Sem essa flag e o erro
+# mais comum ao reproduzir este projeto manualmente.
+TOKEN="$(gcloud auth print-identity-token --include-email)"
+
+curl -H "Authorization: Bearer ${TOKEN}" "${GATEWAY_URL}/agents"
+curl -H "Authorization: Bearer ${TOKEN}" -X POST "${GATEWAY_URL}/invoke/orchestrator" \
+  -d '{"...": "..."}'
+```
+
+Nem `deploy.sh` nem `teardown.sh` rodam `terraform destroy` — a
+infraestrutura (Service Accounts, tópicos, Firestore, bucket, o próprio
+Job/Service como *recurso*) fica no lugar entre uma demo e outra, porque
+não custa nada parada. Só o que está ATIVO (execução de Job rodando,
+instância de Service acima de zero) tem custo — é exatamente isso que
+`teardown.sh` garante que volte a zero.
+
+### Nota sobre reprodutibilidade — orçamento (`budget.tf`) pode exigir passo manual no Console
+
+`terraform apply` do orçamento (`google_billing_budget.sentinel`) pode
+falhar com **403** em `billingbudgets.googleapis.com`, citando um projeto
+`consumer:` diferente do projeto alvo — a Billing Budgets API cobra a
+chamada contra o *quota project* das credenciais ADC locais, não contra
+`var.project_id` (ver comentário completo em `budget.tf`). `deploy.sh`
+(etapa 1) já roda `gcloud auth application-default set-quota-project
+<PROJECT_ID>` para corrigir isso automaticamente; rodando
+`terraform apply` manualmente (sem passar por `deploy.sh`), é fácil
+esquecer esse passo e bater no mesmo 403.
+
+Isso resolve o caso mais comum, mas **não é garantido** — a Billing
+Budgets API também exige que a identidade autenticada tenha um papel IAM
+na própria *conta de faturamento* (`roles/billing.admin` ou
+`roles/billing.user`), não no projeto; em algumas contas essa concessão só
+pode ser feita por quem já é administrador da conta de faturamento, via
+**Console** (`console.cloud.google.com/billing/<BILLING_ACCOUNT_ID>` →
+"Controle de acesso à conta de faturamento" → adicionar principal). Se
+`set-quota-project` não resolver, esse é o próximo passo — documentado
+aqui em vez de deixar como uma falha silenciosa de reprodutibilidade, já
+que o regulamento do hackathon exige honestidade sobre o que reproduz de
+verdade só com os scripts deste repositório.

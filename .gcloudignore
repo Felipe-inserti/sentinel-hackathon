@@ -1,0 +1,43 @@
+# Sentinel -- controla o que `gcloud builds submit` (deploy.sh,
+# scripts/deploy_gemma_cloudrun.sh) faz upload como fonte pro Cloud Build.
+# Diferente de .dockerignore (que so filtra o CONTEXTO do `docker build`
+# depois que a fonte ja chegou no Cloud Build) -- sem este arquivo, o
+# `gcloud builds submit` teria gerado um .gcloudignore automatico a
+# partir do .gitignore da RAIZ, que NAO exclui `dashboard/node_modules`/
+# `dashboard/.next` (~840MB juntos, confirmado neste sprint) porque esses
+# caminhos so estao no .gitignore do proprio dashboard/, nao no da raiz --
+# cada `gcloud builds submit` subiria ~840MB desnecessarios toda vez.
+
+dashboard/
+docs/
+tests/
+infra/
+
+.git/
+.github/
+.claude/
+
+venv/
+.venv/
+.venv*/
+env/
+ENV/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+.env
+.env.*.local
+*.env.local
+*.json.key
+service-account*.json
+credentials*.json
+gcloud-key*.json
+*-key.json
+
+*.tfstate
+*.tfstate.backup

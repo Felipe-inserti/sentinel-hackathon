@@ -23,6 +23,21 @@ class Settings(BaseSettings):
     gcp_project_id: str
     gcp_location: str = "global"
 
+    # Regiao usada SO pelo exportador OTel/Telemetry API (ver telemetry.py),
+    # separada de propósito de `gcp_location` (Vertex AI). Motivo,
+    # reproduzido e confirmado ao vivo contra o backend real (Sprint 8,
+    # Parte B): o ingest de METRICAS (nao traces -- traces exportam sem
+    # erro sem isso) da Telemetry API rejeita a chamada com
+    # "write for resource failed: Unrecognized region or location" quando o
+    # Resource OTel nao carrega um atributo `cloud.region` valido.
+    # `gcp_location`/`GCP_LOCATION=global` e um valor valido pro Vertex AI
+    # (endpoint global do Gemini), mas "global" NAO e uma regiao que o
+    # Cloud Monitoring reconhece para esse atributo -- por isso uma
+    # variavel propria, nunca reaproveitar `gcp_location` aqui. Default
+    # `us-central1` (mesma regiao ja usada por `infra/variables.tf` e pelo
+    # bucket de evidencia).
+    otel_region: str = "us-central1"
+
     # Sem default deliberadamente: o ID de modelo Gemini muda com frequencia
     # e nunca deve ser um valor chutado no codigo -- quem sobe o servico
     # declara explicitamente qual versao validou. Ver .env.example.

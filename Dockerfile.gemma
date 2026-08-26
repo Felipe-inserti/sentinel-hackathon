@@ -1,0 +1,36 @@
+# Sentinel -- serving do Gemma 3 270M via Ollama, para gemma_triage.py
+# (camada de triagem em lote do Plano 1, ver CLAUDE.md/config.py). Pendencia
+# do Sprint 2.5 ("adiada"), resolvida no Sprint 8 Parte B.
+#
+# Diferente dos outros 4 processos (Python puro deste repo), este container
+# roda o binario oficial do Ollama servindo sua propria API HTTP -- e por
+# isso, ao contrario dos workers, um Cloud Run SERVICE de verdade se
+# encaixa aqui (o container escuta HTTP, ver ENTRYPOINT). Ollama nao tem
+# imagem "slim" oficial menor -- partimos de `ollama/ollama:latest`
+# (imagem oficial do projeto), nao de uma reimplementacao.
+#
+# Modelo "assado" na imagem em BUILD time (nao baixado no primeiro
+# request): gemma3:270m e pequeno (270M parametros) o suficiente pra caber
+# tranquilo numa camada da imagem, e evita um cold start lento baixando
+# ~centenas de MB pela rede toda vez que uma instancia nova sobe (min-
+# instances=0, ver infra/README.md -- este servico tambem escala a zero
+# entre usos). Padrao documentado do proprio ecossistema Ollama: sobe o
+# servidor em background, espera inicializar, puxa o modelo pro cache
+# padrao (que fica dentro da imagem por estar numa camada RUN), mata o
+# servidor -- o ENTRYPOINT real (`ollama serve`) so inicia depois, em
+# runtime, e ja encontra o modelo pronto em disco.
+
+FROM ollama/ollama:latest
+
+ENV OLLAMA_HOST=0.0.0.0:8080 \
+    OLLAMA_KEEP_ALIVE=-1
+
+RUN ollama serve & \
+    server_pid=$! ; \
+    sleep 8 ; \
+    ollama pull gemma3:270m ; \
+    kill "$server_pid"
+
+EXPOSE 8080
+
+ENTRYPOINT ["ollama", "serve"]

@@ -211,6 +211,16 @@ def setup(service_name: str) -> trace.Tracer:
                 "service.name": service_name,
                 "cloud.account.id": settings.gcp_project_id,
                 "gcp.project_id": settings.gcp_project_id,
+                # `cloud.region`, NAO `settings.gcp_location` -- reproduzido
+                # contra o backend real (Sprint 8, Parte B): sem um
+                # `cloud.region` valido no Resource, o ingest de METRICAS da
+                # Telemetry API (traces exportam OK sem isso) rejeita com
+                # "write for resource failed: Unrecognized region or
+                # location". `gcp_location` vale "global" neste projeto
+                # (endpoint do Vertex AI) -- "global" nao e uma regiao que o
+                # Cloud Monitoring reconhece aqui, por isso uma variavel
+                # separada (`settings.otel_region`, ver config.py).
+                "cloud.region": settings.otel_region,
             }
         )
     )

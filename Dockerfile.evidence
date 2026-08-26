@@ -1,0 +1,66 @@
+# Sentinel -- imagem de evidence_agent.py (Cloud Run Job, sob demanda --
+# ver infra/README.md). Unico dos 4 workers que abre um browser headless
+# de verdade (Playwright, screenshot full-page).
+#
+# Por que NAO partimos da imagem pre-buildada `mcr.microsoft.com/playwright/
+# python:vX.Y.Z-noble`: ela vem com os TRES browsers (Chromium, Firefox,
+# WebKit) ja instalados na camada base -- nao da pra "desinstalar" os dois
+# que nao usamos sem builder outra imagem por cima, e o pedido explicito
+# era duas coisas ao mesmo tempo ("imagem base oficial do Playwright" +
+# "so Chromium" + "atencao ao tamanho"), que juntas so fecham desse jeito:
+# `python:3.12-slim` (fixa Python 3.12, requisito nao-negociavel deste
+# sprint -- a imagem da Microsoft fixa a PROPRIA versao de Python, fora do
+# nosso controle) + o MECANISMO OFICIAL do Playwright
+# (`playwright install --with-deps chromium`, documentado no proprio
+# playwright.dev) para instalar SO o Chromium e SO as bibliotecas de
+# sistema que ele exige -- nunca baixa Firefox/WebKit. Resultado: imagem
+# final bem menor que a pre-buildada, Python 3.12 garantido, e ainda assim
+# o caminho de instalacao OFICIAL do Playwright (nao um apt-get manual de
+# dependencias adivinhadas).
+
+FROM python:3.12-slim AS builder
+
+WORKDIR /build
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r requirements.txt
+
+FROM python:3.12-slim AS runner
+
+WORKDIR /app
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH" \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+# `playwright install --with-deps chromium` roda como ROOT (precisa de
+# `apt-get` pras dependencias de sistema do Chromium) -- ANTES de criar o
+# usuario nao-root. Documentado explicitamente aqui: este e o comando
+# citado na pendencia do CLAUDE.md ("documente `playwright install
+# --with-deps chromium`") -- nao um `apt-get install` manual de libs
+# adivinhadas.
+RUN playwright install --with-deps chromium
+
+RUN groupadd --system sentinel && useradd --system --gid sentinel --create-home sentinel
+
+COPY config.py registry.py sanitizer.py telemetry.py evidence_agent.py ./
+
+# Playwright baixa o Chromium pro cache do usuario que rodou `install`
+# (root, acima, em /root/.cache/ms-playwright) -- precisa ficar acessivel
+# ao usuario nao-root que roda o processo.
+RUN mkdir -p /home/sentinel/.cache && \
+    cp -r /root/.cache/ms-playwright /home/sentinel/.cache/ms-playwright && \
+    chown -R sentinel:sentinel /home/sentinel/.cache /app
+ENV PLAYWRIGHT_BROWSERS_PATH=/home/sentinel/.cache/ms-playwright
+
+USER sentinel
+
+CMD ["python", "evidence_agent.py"]

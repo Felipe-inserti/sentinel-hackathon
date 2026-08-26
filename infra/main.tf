@@ -283,3 +283,90 @@ resource "google_pubsub_topic_iam_member" "dashboard_publish_takedown_approved" 
   role    = "roles/pubsub.publisher"
   member  = "serviceAccount:${google_service_account.dashboard.email}"
 }
+
+# ---------------------------------------------------------------------------
+# IAM -- Observabilidade (Cloud Trace + Cloud Monitoring), as 5 SAs deste
+# arquivo. Achado real da sessao de validacao de 48h (Sprint 8): o pipeline
+# funciona ponta a ponta (inclusive propagacao de trace_id pelo Pub/Sub,
+# codigo correto em telemetry.py) e `estimated_cost_saved_usd_total`/etc.
+# continuam gravando em Firestore normalmente -- mas NENHUMA das 5 SAs tinha
+# `roles/cloudtrace.agent`/`roles/monitoring.metricWriter`, entao toda
+# chamada de exportacao (`telemetry._try_build_span_processor`/
+# `_try_build_metric_reader`) falhava com PERMISSION_DENIED em
+# `telemetry.traces.write`/`monitoring.timeSeries.create` -- Cloud Trace e
+# Cloud Monitoring ficavam cegos (best-effort, ver telemetry.py: o erro e
+# logado e o processo segue, entao isso nao aparecia como falha dura em
+# lugar nenhum ate a inspecao manual).
+#
+# So 4 processos chamam `telemetry.setup()` hoje (ct_listener.py/
+# orchestrator.py/evidence_agent.py/takedown_agent.py -- ver grep contra o
+# repo) -- `dashboard-sa` (Next.js, sem instrumentacao OTel neste sprint)
+# NAO emite telemetria ainda. Incluida aqui mesmo assim por pedido explicito
+# ("as 5 Service Accounts") e para manter a mesma cobertura das 5 SAs deste
+# arquivo sem exigir voltar aqui se o dashboard ganhar OTel depois -- o
+# custo de conceder um papel de projeto nao usado e zero (sem escrita
+# nenhuma acontece sem chamada correspondente no codigo). `gateway-sa`
+# (cloud_run_gateway.tf) fica DE FORA de proposito: `agent_gateway.py` (Sprint
+# 8 Parte A) tambem nao chama `telemetry.setup()` ainda -- mesma lacuna,
+# fora do escopo desta correcao pontual.
+# ---------------------------------------------------------------------------
+
+resource "google_project_iam_member" "ct_listener_trace" {
+  project = var.project_id
+  role    = "roles/cloudtrace.agent"
+  member  = "serviceAccount:${google_service_account.ct_listener.email}"
+}
+
+resource "google_project_iam_member" "ct_listener_monitoring" {
+  project = var.project_id
+  role    = "roles/monitoring.metricWriter"
+  member  = "serviceAccount:${google_service_account.ct_listener.email}"
+}
+
+resource "google_project_iam_member" "orchestrator_trace" {
+  project = var.project_id
+  role    = "roles/cloudtrace.agent"
+  member  = "serviceAccount:${google_service_account.orchestrator.email}"
+}
+
+resource "google_project_iam_member" "orchestrator_monitoring" {
+  project = var.project_id
+  role    = "roles/monitoring.metricWriter"
+  member  = "serviceAccount:${google_service_account.orchestrator.email}"
+}
+
+resource "google_project_iam_member" "evidence_trace" {
+  project = var.project_id
+  role    = "roles/cloudtrace.agent"
+  member  = "serviceAccount:${google_service_account.evidence.email}"
+}
+
+resource "google_project_iam_member" "evidence_monitoring" {
+  project = var.project_id
+  role    = "roles/monitoring.metricWriter"
+  member  = "serviceAccount:${google_service_account.evidence.email}"
+}
+
+resource "google_project_iam_member" "takedown_trace" {
+  project = var.project_id
+  role    = "roles/cloudtrace.agent"
+  member  = "serviceAccount:${google_service_account.takedown.email}"
+}
+
+resource "google_project_iam_member" "takedown_monitoring" {
+  project = var.project_id
+  role    = "roles/monitoring.metricWriter"
+  member  = "serviceAccount:${google_service_account.takedown.email}"
+}
+
+resource "google_project_iam_member" "dashboard_trace" {
+  project = var.project_id
+  role    = "roles/cloudtrace.agent"
+  member  = "serviceAccount:${google_service_account.dashboard.email}"
+}
+
+resource "google_project_iam_member" "dashboard_monitoring" {
+  project = var.project_id
+  role    = "roles/monitoring.metricWriter"
+  member  = "serviceAccount:${google_service_account.dashboard.email}"
+}

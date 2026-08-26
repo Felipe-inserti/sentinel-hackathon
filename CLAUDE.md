@@ -151,7 +151,11 @@ incompleto) — a coleção `campaigns`, a similaridade por *proximidade*
      PROCESSO do gateway, nunca a do chamador.
   7. **Log de auditoria** — ver acima.
 - `GET /agents` lista o registry inteiro (todos os status), atrás da mesma
-  autenticação. `GET /healthz` sem autenticação (readiness do Cloud Run).
+  autenticação. `GET /readyz` sem autenticação (readiness do Cloud Run —
+  **não** `/healthz`: reproduzido em produção na sessão de validação de 48h
+  do Sprint 8, o Google Frontend do Cloud Run intercepta esse path
+  específico para o probe da própria plataforma e a requisição nunca chega
+  ao FastAPI).
 - **Decisão arquitetural deliberada — `takedown-agent` NUNCA é invocável
   via gateway, para nenhum chamador.** `AUTHORIZATION_POLICY["takedown-agent"]
   = frozenset()` (vazio — nem uma identidade equivalente a `dashboard-sa`
@@ -191,7 +195,7 @@ incompleto) — a coleção `campaigns`, a similaridade por *proximidade*
 - 26 testes novos em `tests/test_agent_gateway.py` (Firestore/Pub/Sub/
   verificação de ID token sempre fakes — mesmo princípio de
   `tests/test_registry.py`/`tests/test_takedown_agent.py`); verificado
-  também com um servidor `uvicorn` real + `curl` reais (`/healthz`,
+  também com um servidor `uvicorn` real + `curl` reais (`/readyz`,
   `/agents` sem auth, `/invoke` com token malformado rejeitado pelo
   verificador REAL do Google).
 - Corrigido de passagem (Parte A, não Parte B): comentário desatualizado em

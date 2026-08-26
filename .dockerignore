@@ -1,0 +1,43 @@
+# Sentinel -- contexto de build Docker (Dockerfile/Dockerfile.evidence/
+# Dockerfile.gemma, ver infra/README.md). Builds sao dos workers Python
+# (raiz do repo) -- nada do dashboard/ (Next.js, seu proprio Dockerfile
+# separado) precisa entrar aqui.
+
+dashboard/
+docs/
+tests/
+infra/
+scripts/gemma/
+
+.git/
+.github/
+.claude/
+
+venv/
+.venv/
+.venv*/
+env/
+ENV/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+.env
+.env.*.local
+*.env.local
+*.json.key
+service-account*.json
+credentials*.json
+gcloud-key*.json
+*-key.json
+
+*.tfstate
+*.tfstate.backup
+
+README.md
+CLAUDE.md
+FINDINGS.md

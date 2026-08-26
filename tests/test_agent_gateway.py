@@ -417,8 +417,8 @@ def client() -> TestClient:
     return TestClient(app)
 
 
-def test_healthz_does_not_require_auth(client: TestClient):
-    response = client.get("/healthz")
+def test_readyz_does_not_require_auth(client: TestClient):
+    response = client.get("/readyz")
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
 

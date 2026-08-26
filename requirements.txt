@@ -16,9 +16,15 @@ opentelemetry-exporter-otlp-proto-grpc
 opentelemetry-resourcedetector-gcp
 
 # evidence_agent.py (Sprint 4)
-playwright        # screenshot full-page headless, navegacao restrita ao dominio alvo
-dnspython         # DNS A/AAAA/NS/MX/TXT + lookup de ASN via Team Cymru (DNS TXT, sem API key)
-cryptography      # parse da cadeia de certificado TLS (emissor/validade/SANs)
+# Pinado (Sprint 8, Parte B) -- Dockerfile.evidence roda `playwright
+# install --with-deps chromium` na mesma build, com a MESMA versao que o
+# pip acabou de instalar; sem pin, uma rebuild futura poderia puxar uma
+# versao mais nova do pacote Python cujo instalador de browser mudou de
+# comportamento, sem isso ficar visivel no diff. Versao confirmada
+# instalada e testada neste sprint.
+playwright==1.62.0  # screenshot full-page headless, navegacao restrita ao dominio alvo
+dnspython           # DNS A/AAAA/NS/MX/TXT + lookup de ASN via Team Cymru (DNS TXT, sem API key)
+cryptography        # parse da cadeia de certificado TLS (emissor/validade/SANs)
 
 # agent_gateway.py (Sprint 8, Parte A)
 fastapi           # unico servico HTTP sincrono deste projeto alem do dashboard Next.js
