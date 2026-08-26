@@ -126,6 +126,78 @@ calcula `infrastructure_fingerprint`/`fingerprint_hash` por dossiê
 incompleto) — a coleção `campaigns`, a similaridade por *proximidade*
 (não só hash idêntico) e o takedown em lote continuam por implementar.
 
+### Sprint 8 (Parte A) — Agent Gateway
+- `agent_gateway.py`: ponto ÚNICO de entrada HTTP (FastAPI/uvicorn — único
+  serviço síncrono deste projeto além do dashboard Next.js) para invocar
+  qualquer agente do Agent Registry. `POST /invoke/{agent_id}` aplica, NESTA
+  ORDEM, e audita QUALQUER rejeição (sucesso ou falha, em qualquer etapa) em
+  Firestore (`agent_gateway_audit_log`, um documento novo por chamada):
+  1. **Autenticação (Agent Identity)** — `Authorization: Bearer <ID token
+     do Google>`, verificado de verdade (`google.oauth2.id_token`, nunca
+     decodificado sem checar assinatura); a claim `email` vira a identidade
+     do chamador — o mesmo conceito de identidade que `infra/main.tf` já
+     materializa como uma Service Account por agente.
+  2. **Resolução no registry** — `registry.get_agent`, mesma semântica de
+     `registry.py` (última versão `ACTIVE`, ou a versão explícita pedida).
+  3. **Validação de schema** — `jsonschema.validate` contra o
+     `input_schema` publicado.
+  4. **Rate limit** — contador transacional no Firestore
+     (`agent_gateway_rate_limits`) por identidade+agente+minuto UTC
+     (default 30/min, `settings.agent_gateway_rate_limit_per_minute`).
+  5. **Política de autorização** — `AUTHORIZATION_POLICY` (dict em código,
+     nega por padrão qualquer `agent_id` sem entrada explícita).
+  6. **Roteamento** — publica o payload validado no tópico Pub/Sub que o
+     agente-alvo consome (`AGENT_ROUTING_TOPIC`), com a identidade do
+     PROCESSO do gateway, nunca a do chamador.
+  7. **Log de auditoria** — ver acima.
+- `GET /agents` lista o registry inteiro (todos os status), atrás da mesma
+  autenticação. `GET /healthz` sem autenticação (readiness do Cloud Run).
+- **Decisão arquitetural deliberada — `takedown-agent` NUNCA é invocável
+  via gateway, para nenhum chamador.** `AUTHORIZATION_POLICY["takedown-agent"]
+  = frozenset()` (vazio — nem uma identidade equivalente a `dashboard-sa`
+  está na lista); a rejeição na etapa 5 devolve um erro dedicado
+  (`human_approval_required_via_dashboard`), não o "não autorizado"
+  genérico. Motivo: rotear uma invocação de `takedown-agent` pelo gateway
+  exigiria dar à SA do gateway `roles/pubsub.publisher` em
+  `takedown-approved` — um SEGUNDO publisher nesse tópico, além de
+  `dashboard-sa`. Cogitado e rejeitado depois de revisão explícita: mesmo
+  com `takedown_agent.py::_load_verified_approval` reconfirmando a
+  aprovação no Firestore antes de agir (defesa em profundidade que
+  continuaria funcionando), a garantia mais forte e mais fácil de auditar
+  — "um único publisher, o fluxo humano do dashboard" (regra #4 acima) —
+  foi considerada mais valiosa que ter um segundo caminho síncrono para o
+  mesmo efeito. `dashboard-sa` continua sendo a ÚNICA identidade com
+  `roles/pubsub.publisher` em `takedown-approved`; a Parte B (deploy) NÃO
+  deve conceder esse papel à SA do gateway. Documentado em
+  `agent_gateway.py` (comentário de `AUTHORIZATION_POLICY`) e
+  `infra/README.md` (seção "Decisão — o Agent Gateway nunca ganha publish
+  em `takedown-approved`").
+- `ct-listener` também não é roteável (fica fora de `AGENT_ROUTING_TOPIC`)
+  pelo motivo oposto: não tem ponto de entrada controlado (consome um
+  websocket público de terceiros) — rejeitado na etapa 6 (roteamento,
+  `not_routable`), não na 5, porque o motivo é arquitetural, não de
+  identidade. `orchestrator` e `evidence-collector` continuam roteáveis por
+  qualquer identidade autenticada.
+- `settings.agent_gateway_audience` (novo em `config.py`) não tem default
+  fixo, de propósito — mesma disciplina de `GEMINI_MODEL_ID`: não existe
+  URL genérica correta antes do Cloud Run atribuir uma. Sem configurar
+  (dev local), o gateway aceita qualquer ID token válido SEM checar
+  audience (assinatura/expiração continuam checadas) e avisa alto no log
+  de startup. A Parte B configura essa variável com a URL real do serviço
+  depois do deploy.
+- `settings.takedown_topic_id` (novo em `config.py`) só documenta o nome
+  do tópico em Python (antes só `infra/`/`dashboard/` conheciam) — não é
+  usado por `AGENT_ROUTING_TOPIC` (ver decisão acima).
+- 26 testes novos em `tests/test_agent_gateway.py` (Firestore/Pub/Sub/
+  verificação de ID token sempre fakes — mesmo princípio de
+  `tests/test_registry.py`/`tests/test_takedown_agent.py`); verificado
+  também com um servidor `uvicorn` real + `curl` reais (`/healthz`,
+  `/agents` sem auth, `/invoke` com token malformado rejeitado pelo
+  verificador REAL do Google).
+- Corrigido de passagem (Parte A, não Parte B): comentário desatualizado em
+  `sanitizer.py` sobre Model Armor/`us-central1` (ver pendência removida
+  abaixo).
+
 ### Pendências acumuladas para o Sprint 8
 - Métricas OTel sendo rejeitadas pelo Cloud Monitoring por causa de
   `GCP_LOCATION=global` (ver `telemetry.py`).
@@ -135,10 +207,9 @@ incompleto) — a coleção `campaigns`, a similaridade por *proximidade*
 - Dockerfile/deploy da camada de triagem Gemma (`gemma_triage.py`) para
   Cloud Run ainda não confirmado neste sprint (script citado em
   `config.py`/`gemma_triage.py`, não verificado por execução).
-- Comentário desatualizado em `sanitizer.py` (pesquisa sobre Model Armor)
-  afirmando que a região `us-central1` é "compatível com o default de
-  `config.gcp_location`" — o default real hoje é `global`
-  (`GCP_LOCATION=global`, ver `config.py`), não `us-central1`.
+- Dockerfile/deploy do próprio `agent_gateway.py` (Sprint 8, Parte A) para
+  Cloud Run, e o binding de IAM da SA nova — ainda não feitos, ficam para a
+  Parte B (deploy). Ver decisão acima sobre o que essa SA NÃO deve ganhar.
 - Sincronização de `brand_memory` é pull manual (`sync_brand_memory.py`),
   não reativa: `dashboard/.../review/actions.ts::rejectInvestigation`/
   `approveTakedown` não publicam nenhum evento que dispare a gravação
@@ -150,7 +221,9 @@ incompleto) — a coleção `campaigns`, a similaridade por *proximidade*
 ### Tópicos Pub/Sub existentes
 `suspicious-domain-detected` · `investigation-completed` · `takedown-approved`
 (este último, junto da subscription abaixo, provisionado por `infra/` —
-antes só documentado, nenhum script realmente o criava)
+antes só documentado, nenhum script realmente o criava). `agent_gateway.py`
+não cria nenhum tópico novo — só publica nos dois primeiros, via
+`AGENT_ROUTING_TOPIC` (ver Sprint 8 Parte A acima).
 
 ### Subscriptions existentes
 `sub-orchestrator` · `sub-takedown` (consumida exclusivamente por
@@ -158,7 +231,8 @@ antes só documentado, nenhum script realmente o criava)
 
 ### Firestore
 Coleções `investigations`, `agent_registry`, `brand_context` (Sprint 7A),
-`brand_memory` (Sprint 7B)
+`brand_memory` (Sprint 7B), `agent_gateway_audit_log` e
+`agent_gateway_rate_limits` (Sprint 8A)
 
 ## Regras de segurança inegociáveis
 

@@ -71,6 +71,15 @@ class Settings(BaseSettings):
     # publicada, nunca iniciar uma acao por conta propria).
     takedown_subscription_id: str = "sub-takedown"
 
+    # Topico Pub/Sub de aprovacao de takedown -- ja provisionado por
+    # infra/main.tf (recurso `google_pubsub_topic.takedown_approved`, var
+    # `takedown_topic_id`, mesmo default). Nao existia em `config.py` ate
+    # aqui: so o dashboard (`dashboard/src/lib/gcp.ts::TAKEDOWN_TOPIC_ID`)
+    # e o Terraform conheciam o nome; `agent_gateway.py` (Sprint 8, Parte
+    # A) precisa dele em Python para rotear uma invocacao de
+    # `takedown-agent` para o topico correto.
+    takedown_topic_id: str = "takedown-approved"
+
     # Log de auditoria imutavel de cada execucao/rejeicao de takedown (ver
     # takedown_agent.py::_write_audit_record). Um documento novo por acao
     # (Firestore `.add()`), nunca atualizado -- historico, nao estado.
@@ -149,6 +158,36 @@ class Settings(BaseSettings):
     # de fetch), entao trate como aproximacao, nao como fonte de billing.
     cloud_run_cpu_price_per_vcpu_second_usd: float = 0.000024
     cloud_run_memory_price_per_gib_second_usd: float = 0.0000025
+
+    # Agent Gateway (Sprint 8, Parte A -- ver agent_gateway.py). Ponto UNICO
+    # de entrada HTTP para invocar qualquer agente do registry.
+    #
+    # Audience esperada nos ID tokens do Google verificados na etapa de
+    # autenticacao (Agent Identity) -- deve ser a URL publica do proprio
+    # servico depois do deploy (ver infra/README.md), para impedir que um
+    # ID token emitido para OUTRO servico Cloud Run seja reaproveitado
+    # aqui (confusao de audience). Sem default fixo por design (igual a
+    # `gemini_model_id`/`brand_security_team_email`): nao existe um valor
+    # generico correto antes do Cloud Run atribuir a URL. `None` (default
+    # de desenvolvimento local) pula a checagem de audience -- a
+    # assinatura/expiracao do token ainda sao verificadas -- e emite um
+    # aviso alto no log de startup; NUNCA deixar `None` em producao.
+    agent_gateway_audience: str | None = None
+
+    # Log de auditoria imutavel de toda chamada a POST /invoke/{agent_id}
+    # -- sucesso OU rejeicao em qualquer etapa do pipeline (autenticacao,
+    # resolucao, schema, rate limit, autorizacao, roteamento). Mesmo
+    # padrao de `takedown_actions_collection`: um documento novo por
+    # chamada, nunca atualizado.
+    agent_gateway_audit_log_collection: str = "agent_gateway_audit_log"
+
+    # Rate limit por identidade chamadora + agente, contador transacional
+    # por janela de minuto (mesmo mecanismo de
+    # `takedown_rate_limit_collection`, mas com janela de minuto em vez de
+    # dia -- o gateway protege contra abuso de chamada sincrona, nao
+    # contra volume diario de notificacao externa).
+    agent_gateway_rate_limit_collection: str = "agent_gateway_rate_limits"
+    agent_gateway_rate_limit_per_minute: int = 30
 
 
 settings = Settings()

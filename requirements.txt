@@ -19,3 +19,11 @@ opentelemetry-resourcedetector-gcp
 playwright        # screenshot full-page headless, navegacao restrita ao dominio alvo
 dnspython         # DNS A/AAAA/NS/MX/TXT + lookup de ASN via Team Cymru (DNS TXT, sem API key)
 cryptography      # parse da cadeia de certificado TLS (emissor/validade/SANs)
+
+# agent_gateway.py (Sprint 8, Parte A)
+fastapi           # unico servico HTTP sincrono deste projeto alem do dashboard Next.js
+uvicorn[standard] # servidor ASGI -- comando de deploy real em infra/ (Parte B)
+httpx             # so para tests/test_agent_gateway.py (fastapi.testclient.TestClient)
+google-auth       # google.oauth2.id_token -- verificacao de ID token (Agent Identity do
+                  # gateway). Ja vinha transitivo via google-cloud-firestore/pubsub, mas
+                  # um import direto merece dependencia explicita (regra do CLAUDE.md).

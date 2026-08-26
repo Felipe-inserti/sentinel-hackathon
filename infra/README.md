@@ -130,3 +130,32 @@ lixo em `investigations` apesar do wrapper de aplicação (nota ² acima), ou
 gastar cota de Vertex AI. Isso é um risco residual aceito, documentado,
 não escondido atrás de uma alegação de isolamento total que deixou de ser
 verdade.
+
+## Decisão — o Agent Gateway (Sprint 8, Parte A) NUNCA ganha publish em `takedown-approved`
+
+`agent_gateway.py` (Sprint 8, Parte A — fora deste Terraform, roda como
+Cloud Run service, com SA própria a provisionar na Parte B) é o ponto
+único de entrada HTTP para invocar qualquer agente do registry, e resolve
+uma invocação publicando no tópico Pub/Sub que o agente-alvo consome. Dar
+esse mesmo tratamento a `takedown-agent` foi cogitado e **rejeitado**
+depois de revisão explícita: `agent_gateway.py::AUTHORIZATION_POLICY["takedown-agent"]`
+é `frozenset()` — nenhum chamador, nem uma identidade equivalente a
+`dashboard-sa`, consegue invocar `takedown-agent` pelo gateway. A rejeição
+devolve um erro estruturado dedicado
+(`human_approval_required_via_dashboard`, não o "não autorizado"
+genérico) explicando que o único caminho é o fluxo humano do dashboard.
+
+Por quê: dar à SA do gateway `roles/pubsub.publisher` em
+`takedown-approved` — necessário para rotear qualquer coisa para lá —
+criaria um **segundo publisher** nesse tópico. A defesa em profundidade de
+`takedown_agent.py::_load_verified_approval` (reconfirma a aprovação no
+Firestore antes de agir, independente de quem publicou a mensagem)
+continuaria funcionando mesmo assim — mas a garantia mais forte e mais
+fácil de auditar hoje, "um único publisher, o fluxo humano do dashboard",
+vale mais que a conveniência de um segundo caminho síncrono para o mesmo
+efeito. Por isso a matriz de IAM da Parte B NÃO deve incluir
+`roles/pubsub.publisher` em `takedown-approved` para a SA do gateway —
+`dashboard-sa` continua sendo a ÚNICA identidade com essa permissão,
+exatamente como documentado na seção acima. A garantia topológica
+original permanece intacta; o gateway não é "mais uma camada" dela, é um
+caminho que foi conscientemente deixado de fora.

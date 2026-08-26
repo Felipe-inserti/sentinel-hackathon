@@ -26,7 +26,11 @@ Investiguei o uso do Model Armor (SanitizeUserPrompt) como camada adicional
 antes do modelo:
   - Regiao: `us-central1` (Iowa) E suportada -- confirmado via fetch direto
     de https://docs.cloud.google.com/model-armor/locations (nao adivinhado).
-    Compativel com o default de `config.gcp_location`.
+    NAO e compativel com o default atual de `config.gcp_location`
+    (`GCP_LOCATION=global`, ver `config.py`) -- Model Armor exige uma
+    regiao especifica, "global" nao esta entre as suportadas. Uma
+    integracao futura precisaria de uma chamada em `us-central1` separada
+    da regiao usada pelo Vertex AI, nao herdar `gcp_location` direto.
   - Pacote Python: `google-cloud-modelarmor`
     (`pip install --upgrade google-cloud-modelarmor`). O nome exato da
     classe cliente e a assinatura do metodo NAO foram confirmados na
