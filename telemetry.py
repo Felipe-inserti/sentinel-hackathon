@@ -104,6 +104,17 @@ _COUNTER_NAMES = (
     # DRY_RUN=false sem suporte) -- ver takedown_agent.py::process_takedown_approval.
     "takedown_actions_executed_total",
     "takedown_actions_rejected_total",
+    # brand_memory.py (Sprint 7, Parte B) -- few-shot injetado por marca.
+    # O trade-off explicito pedido no sprint: few-shot melhora precisao mas
+    # aumenta tokens de ENTRADA por investigacao, contra a tese de token
+    # economy (ver CLAUDE.md) -- estes contadores tornam esse custo
+    # visivel em vez de escondido. Estimativa por heuristica de
+    # caracteres/token (ver brand_memory.estimate_extra_tokens), nao
+    # medicao real de tokenizador -- mesma disciplina de aproximacao
+    # documentada em config.py para o preco do Cloud Run.
+    "brand_memory_examples_injected_total",
+    "brand_memory_estimated_extra_tokens_total",
+    "brand_memory_estimated_extra_cost_usd_total",
 )
 
 _propagator = TraceContextTextMapPropagator()

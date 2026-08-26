@@ -56,6 +56,97 @@ aumenta chamadas de LLM sem ganho proporcional, ela está errada.
 - `infra/` (Terraform): uma Service Account por agente, permissão mínima.
   Ver `infra/README.md` para a matriz de permissões completa.
 
+### Sprint 7 (Parte A) — Brand Agents
+- `brand_agent.py`: `BrandContext` (Pydantic, Firestore
+  `brand_context/{brand_id}`) — domínios legítimos, padrões de
+  typosquatting já observados, contatos de abuso, tolerância a risco,
+  limiar de confiança para escalar. Cada marca é publicada no Agent
+  Registry como `brand-agent-{brand_id}` e descoberta via
+  `registry.invoke_agent` — mesmo mecanismo do orchestrator/
+  evidence-collector/takedown-agent, sem caminho paralelo de invocação.
+- `seed_brand_agents.py`: publica `brand-agent-{nubank,loggi,ifood}@1.0.0`
+  (as três marcas já monitoradas por `prefilter.MONITORED_BRANDS` — não
+  inclui "Itaú", citada no pedido original mas não monitorada hoje; ver
+  pendência abaixo).
+- `orchestrator.py` roteia para o `BrandAgent` da marca detectada em todo
+  cache miss; quando resolvido, o limiar de escalonamento PRÓPRIO daquela
+  marca se soma (OR) ao sinal de injeção para decidir
+  `requires_human_review`; `brand_agent_id`/`brand_agent_version` ficam
+  carimbados no dossiê.
+- **Isolamento entre marcas:** `BrandScopedInvestigations` filtra
+  `investigations` por `matched_brand` NA QUERY do Firestore (nunca em
+  memória depois de trazer tudo) e recusa (`BrandIsolationViolation`)
+  qualquer lookup por domínio único que devolva dossiê de outra marca.
+  Garantia de APLICAÇÃO, não de IAM — Firestore não tem IAM por coleção
+  (mesma limitação já documentada para `takedown-sa`/
+  `ReadOnlyCollectionAccess`, ver `infra/README.md`).
+
+### Sprint 7 (Parte B) — Memory Bank Adaptativo
+- `brand_memory.py`: `MemoryEntry` (Firestore `brand_memory`, `doc_id`
+  determinístico `{brand}__{domínio}__{tipo}__{decidido_em}` — idempotente
+  e versionado/datado por construção, nunca sobrescreve uma decisão nova).
+  Toda rejeição humana (`investigations/{domínio}.status == "REJECTED"`)
+  vira `REJECTED_FALSE_POSITIVE`; toda aprovação de takedown
+  (`status == "TAKEDOWN_APPROVED"`) vira `APPROVED_TRUE_POSITIVE`. Todo
+  texto (reasoning do LLM + justificativa humana) passa por
+  `sanitizer.sanitize` ANTES de persistir — "uma rejeição humana não
+  santifica o texto".
+- `sync_brand_memory.py`: varre `investigations` (via
+  `BrandScopedInvestigations`, isolado por marca) por decisões terminais
+  ainda não espelhadas em `brand_memory` e as grava. **Pull, não push** —
+  ver pendência Sprint 8 abaixo sobre por quê.
+- `orchestrator.py`: em cache miss com `BrandAgent` resolvido, busca até
+  `settings.brand_memory_max_examples` (default 3, configurável — 0
+  desliga a injeção inteira) memórias mais relevantes daquela marca
+  (relevância = similaridade de domínio via Levenshtein, zero custo de
+  LLM) e injeta como few-shot DENTRO do mesmo bloco delimitado que já
+  carrega o conteúdo raspado (mesmo nonce, mesma detecção de escape —
+  nunca um segundo canal de dado não confiável). Custo estimado (heurística
+  de caracteres/token, nunca medição real de tokenizador) sempre registrado
+  em telemetria (`brand_memory_examples_injected_total`,
+  `brand_memory_estimated_extra_tokens_total`,
+  `brand_memory_estimated_extra_cost_usd_total`) — o trade-off contra a
+  tese de token economy fica visível, nunca escondido.
+- `replay_investigation.py`: demonstra a correção via memória sem
+  retreino (reprocessa um domínio antes classificado errado e mostra o
+  novo veredito, com/sem few-shot, no mesmo conteúdo). **Verificado contra
+  o Gemini real** (não só mockado): MALICIOUS (1.00) → SAFE (0.95), custo
+  do few-shot medido em $0.000088.
+
+**Novas coleções Firestore desta parte:** `brand_context`, `brand_memory`.
+
+### Pendência explícita — Sprint 7 Parte C (Clustering de Campanha) NÃO implementada
+Agrupar dossiês MALICIOUS em campanhas por fingerprint de infraestrutura
+(IP/ASN, registrar, emissor de certificado, hash de template DOM,
+proximidade temporal de registro), takedown em lote e grafo de relações no
+dashboard — **adiado, priorizando o Sprint 8**. `evidence_agent.py` já
+calcula `infrastructure_fingerprint`/`fingerprint_hash` por dossiê
+(Sprint 4) e `dashboard/.../campaigns/page.tsx` já tem um MVP honesto
+(agrupamento por hash exato, documentado no próprio código como
+incompleto) — a coleção `campaigns`, a similaridade por *proximidade*
+(não só hash idêntico) e o takedown em lote continuam por implementar.
+
+### Pendências acumuladas para o Sprint 8
+- Métricas OTel sendo rejeitadas pelo Cloud Monitoring por causa de
+  `GCP_LOCATION=global` (ver `telemetry.py`).
+- Playwright sem as bibliotecas de sistema necessárias no ambiente de
+  execução (`evidence_agent.py` depende de um browser headless real para o
+  screenshot full-page).
+- Dockerfile/deploy da camada de triagem Gemma (`gemma_triage.py`) para
+  Cloud Run ainda não confirmado neste sprint (script citado em
+  `config.py`/`gemma_triage.py`, não verificado por execução).
+- Comentário desatualizado em `sanitizer.py` (pesquisa sobre Model Armor)
+  afirmando que a região `us-central1` é "compatível com o default de
+  `config.gcp_location`" — o default real hoje é `global`
+  (`GCP_LOCATION=global`, ver `config.py`), não `us-central1`.
+- Sincronização de `brand_memory` é pull manual (`sync_brand_memory.py`),
+  não reativa: `dashboard/.../review/actions.ts::rejectInvestigation`/
+  `approveTakedown` não publicam nenhum evento que dispare a gravação
+  automaticamente. Decisão deliberada do Sprint 7 para não alterar o
+  dashboard já deployado sem aprovação explícita — fechar esse loop exige
+  ou um evento novo publicado pelo dashboard, ou outra forma de trigger
+  reativo.
+
 ### Tópicos Pub/Sub existentes
 `suspicious-domain-detected` · `investigation-completed` · `takedown-approved`
 (este último, junto da subscription abaixo, provisionado por `infra/` —
@@ -66,7 +157,8 @@ antes só documentado, nenhum script realmente o criava)
 `takedown-sa`, ver `infra/README.md`)
 
 ### Firestore
-Coleções `investigations`, `agent_registry`
+Coleções `investigations`, `agent_registry`, `brand_context` (Sprint 7A),
+`brand_memory` (Sprint 7B)
 
 ## Regras de segurança inegociáveis
 

@@ -96,6 +96,27 @@ class Settings(BaseSettings):
     # hard-coded no orquestrador.
     agent_registry_collection: str = "agent_registry"
 
+    # BrandAgent (Sprint 7, Parte A -- ver brand_agent.py). Contexto
+    # operacional MUTAVEL por marca cliente (dominios legitimos, padroes de
+    # typosquatting observados, contatos de abuso, tolerancia a risco,
+    # limiar de escalonamento) -- distinto do AgentManifest publicado no
+    # Agent Registry, que e o CONTRATO/versao (input/output schema), nao o
+    # dado em si. Mesma separacao que ja existe entre "registry" (contrato)
+    # e "investigations" (dado real gravado pelo orquestrador).
+    brand_context_collection: str = "brand_context"
+
+    # Memory Bank Adaptativo (Sprint 7, Parte B -- ver brand_memory.py).
+    # Toda decisao humana terminal (rejeicao = falso positivo, aprovacao de
+    # takedown = verdadeiro positivo) vira uma entrada aqui, injetada como
+    # few-shot nas proximas investigacoes da mesma marca.
+    brand_memory_collection: str = "brand_memory"
+    # Quantos exemplos, no maximo, sao injetados por investigacao -- few-
+    # shot aumenta tokens de ENTRADA (trabalha CONTRA a tese de token
+    # economy do projeto, ver CLAUDE.md), entao isso e deliberadamente
+    # configuravel: 0 desliga a injecao inteira, inclusive a leitura extra
+    # no Firestore (ver brand_memory.get_relevant_memories).
+    brand_memory_max_examples: int = 3
+
     # Camada de triagem Gemma (ver gemma_triage.py). Default e o endereco
     # padrao do `ollama serve` local (convencao do proprio Ollama, nao um
     # chute) -- bom para dev/teste. Em producao, aponte para a URL real do
