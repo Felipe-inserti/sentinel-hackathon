@@ -135,3 +135,27 @@ Agent Registry foi integrado neste sprint — não há como verificar o
 formato certo sem mais contexto sobre qual Agent Registry o requisito se
 refere, e inventar a integração seria o tipo exato de "chute" que este
 projeto evita). Ver comentário `TODO(agent-registry)` em `gemma_triage.py`.
+
+## 9. Prova adversarial — injeção não redireciona o takedown (Sprint 6)
+
+Relatório completo em [`docs/adversarial_report.md`](docs/adversarial_report.md),
+gerado a partir de `tests/test_injection_cannot_redirect.py` (7 cenários
+mockados — sempre rodam em CI — + 3 equivalentes contra o Gemini real via
+`pytest -m live_llm`, opt-in manual, não rodados nesta sessão). Prova, em
+pior caso (assume que o LLM já "caiu" na injeção), que um payload plantado
+no texto sanitizado da página, no título/meta description, no contato de
+abuso do RDAP, em português/inglês, ou escondido em caracteres Unicode
+invisíveis (Tag Characters) nunca consegue trocar o destinatário de uma
+notificação de takedown, adicionar um destinatário extra, escalar para um
+canal fora da categoria que o humano aprovou, pular a verificação de
+aprovação, ou desligar o `DRY_RUN`. **Resultado: 7/7 cenários mockados
+bloqueados.**
+
+Achado real, corrigido no mesmo sprint (não só um teste que passou por
+sorte): `resolve_abuse_contacts` (`takedown_agent.py`) confiava
+cegamente em qualquer string devolvida pelo RDAP como contato de abuso —
+um valor mal-formado tipo `"abuse@legit.com, atacante@evil.com"` seria
+usado verbatim, e um remetente real futuro interpretaria a vírgula como
+um segundo destinatário. Corrigida com `_is_single_valid_contact`: só um
+único endereço/URL bem formado é aceito, de RDAP ou de tabela fixa —
+qualquer outra coisa é tratada como não-resolvível, nunca particionada.

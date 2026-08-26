@@ -1,14 +1,21 @@
 certstream
 google-cloud-pubsub
 google-cloud-firestore
+google-cloud-storage
 Levenshtein
 beautifulsoup4
 requests
 google-genai
 pydantic-settings
+jsonschema
 pytest
 pytest-asyncio
 opentelemetry-api
 opentelemetry-sdk
 opentelemetry-exporter-otlp-proto-grpc
 opentelemetry-resourcedetector-gcp
+
+# evidence_agent.py (Sprint 4)
+playwright        # screenshot full-page headless, navegacao restrita ao dominio alvo
+dnspython         # DNS A/AAAA/NS/MX/TXT + lookup de ASN via Team Cymru (DNS TXT, sem API key)
+cryptography      # parse da cadeia de certificado TLS (emissor/validade/SANs)

@@ -43,14 +43,30 @@ aumenta chamadas de LLM sem ganho proporcional, ela está errada.
 - Persiste em Firestore (`investigations`) e publica em
   `investigation-completed`.
 
+### Camada 3 — Agent Registry & Identity (Sprint 3)
+- `registry.py`: repositório central de manifestos (`AgentManifest`,
+  Pydantic) em Firestore (`agent_registry`) — publish/get/list/deprecate,
+  mais `invoke_agent` (descoberta + validação de payload contra o
+  `input_schema` publicado antes de qualquer execução).
+- `seed_registry.py`: publica os manifestos de `ct-listener`,
+  `orchestrator`, `evidence-collector` e `takedown-agent`.
+- `orchestrator.py` descobre sua própria versão/contrato ativo via
+  `registry.invoke_agent`, não por import hard-coded — todo dossiê grava
+  `agent_id`/`agent_version`.
+- `infra/` (Terraform): uma Service Account por agente, permissão mínima.
+  Ver `infra/README.md` para a matriz de permissões completa.
+
 ### Tópicos Pub/Sub existentes
 `suspicious-domain-detected` · `investigation-completed` · `takedown-approved`
+(este último, junto da subscription abaixo, provisionado por `infra/` —
+antes só documentado, nenhum script realmente o criava)
 
 ### Subscriptions existentes
-`sub-orchestrator`
+`sub-orchestrator` · `sub-takedown` (consumida exclusivamente por
+`takedown-sa`, ver `infra/README.md`)
 
 ### Firestore
-Coleção `investigations`
+Coleções `investigations`, `agent_registry`
 
 ## Regras de segurança inegociáveis
 

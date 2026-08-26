@@ -1,0 +1,25 @@
+# Build explícito via Cloud Build, com --build-arg de verdade.
+#
+# Por quê: `gcloud run deploy --source .` com Dockerfile presente NÃO
+# repassa `--set-build-env-vars` como `--build-arg` pro `docker build`
+# (esse flag só tem efeito em builds via Cloud Native Buildpacks, sem
+# Dockerfile -- confirmado na prática: o primeiro deploy deste sprint
+# "funcionou" mas o Client ID ficou vazio no bundle do cliente). Este
+# arquivo builda a imagem aqui, com os ARGs certos, e empurra pro
+# Artifact Registry -- o deploy em si continua sendo
+# `gcloud run deploy --image=...` (ver README.md).
+steps:
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      - build
+      - --build-arg
+      - NEXT_PUBLIC_GOOGLE_CLIENT_ID=${_NEXT_PUBLIC_GOOGLE_CLIENT_ID}
+      - --build-arg
+      - NEXT_PUBLIC_GCP_PROJECT_ID=${_NEXT_PUBLIC_GCP_PROJECT_ID}
+      - -t
+      - ${_IMAGE}
+      - .
+images:
+  - ${_IMAGE}
+options:
+  logging: CLOUD_LOGGING_ONLY

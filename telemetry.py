@@ -92,6 +92,18 @@ _COUNTER_NAMES = (
     "gemma_escalated_total",
     "gemma_fallback_total",
     "gemma_triage_cost_usd_total",
+    # evidence_agent.py (Sprint 4) -- coleta e determinística/zero-LLM, entao
+    # nao ha contador de custo aqui; so o par completo/parcial, para
+    # observabilidade de quantos dossies chegam com o bundle incompleto
+    # (ex: site saiu do ar entre a investigacao e a coleta de evidencia).
+    "evidence_bundles_collected_total",
+    "evidence_bundles_partial_total",
+    # takedown_agent.py (Sprint 6) -- executado conta uma acao completa
+    # (>=0 canais notificados em DRY_RUN); rejeitado cobre TODAS as
+    # recusas de seguranca (sem aprovacao, allowlist, rate limit,
+    # DRY_RUN=false sem suporte) -- ver takedown_agent.py::process_takedown_approval.
+    "takedown_actions_executed_total",
+    "takedown_actions_rejected_total",
 )
 
 _propagator = TraceContextTextMapPropagator()

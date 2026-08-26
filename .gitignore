@@ -33,3 +33,14 @@ __pycache__/
 
 # Claude Code — config local pessoal, não compartilhar
 .claude/settings.local.json
+
+# Terraform (infra/) — cache de provider e estado local nunca commitados;
+# .terraform.lock.hcl FICA versionado (reprodutibilidade de versão do provider)
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars
+!*.tfvars.example
+crash.log
+crash.*.log

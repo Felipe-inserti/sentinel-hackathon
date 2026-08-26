@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     )
 
     gcp_project_id: str
-    gcp_location: str = "us-central1"
+    gcp_location: str = "global"
 
     # Sem default deliberadamente: o ID de modelo Gemini muda com frequencia
     # e nunca deve ser um valor chutado no codigo -- quem sobe o servico
@@ -38,6 +38,17 @@ class Settings(BaseSettings):
     completed_topic_id: str = "investigation-completed"
     orchestrator_subscription_id: str = "sub-orchestrator"
 
+    # evidence_agent.py (Sprint 4). Subscription propria sobre o topico
+    # investigation-completed ja existente -- mesmo padrao de
+    # sub-orchestrator/sub-takedown (uma subscription por consumidor, ver
+    # infra/). evidence_gcs_bucket sem default fixo por design: nomes de
+    # bucket GCS sao globalmente unicos, entao o default e calculado em
+    # tempo de execucao como "{gcp_project_id}-sentinel-evidence" (mesma
+    # formula de infra/main.tf::local.evidence_bucket_name) -- so defina
+    # esta variavel se o nome calculado colidir com um bucket existente.
+    evidence_subscription_id: str = "sub-evidence"
+    evidence_gcs_bucket: str | None = None
+
     # Telemetria (ver telemetry.py). Desligar para testes locais/CI -- sem
     # isso, cada teste tentaria abrir um canal gRPC autenticado de verdade
     # contra telemetry.googleapis.com.
@@ -53,7 +64,37 @@ class Settings(BaseSettings):
     gemini_input_price_per_million_usd: float = 0.75
     gemini_output_price_per_million_usd: float = 3.75
 
+    # takedown_agent.py (Sprint 6). Subscription propria sobre o topico
+    # takedown-approved -- ja provisionada por infra/ (ver infra/README.md;
+    # sub-takedown e o UNICO binding IAM de takedown-sa, garantia de
+    # infraestrutura de que este processo so pode reagir a uma aprovacao ja
+    # publicada, nunca iniciar uma acao por conta propria).
+    takedown_subscription_id: str = "sub-takedown"
+
+    # Log de auditoria imutavel de cada execucao/rejeicao de takedown (ver
+    # takedown_agent.py::_write_audit_record). Um documento novo por acao
+    # (Firestore `.add()`), nunca atualizado -- historico, nao estado.
+    takedown_actions_collection: str = "takedown_actions"
+    # Contador de rate limit por marca/dia -- documento
+    # `{marca}_{data-ISO}`, incrementado atomicamente numa transacao antes
+    # de qualquer notificacao ser sequer preparada.
+    takedown_rate_limit_collection: str = "takedown_rate_limits"
+    takedown_daily_rate_limit_per_brand: int = 20
+
+    # Endereco do time interno de Brand Security -- unico destino do canal
+    # BRAND_SECURITY_TEAM (ver takedown_agent.py). Sem default deliberado:
+    # e um endereco especifico da organizacao rodando o Sentinel, nao algo
+    # que faca sentido chutar (mesma disciplina de GEMINI_MODEL_ID). Sem
+    # configurar, o canal fica indisponivel -- rejeitado com log de
+    # seguranca quando selecionado, nunca inventado.
+    brand_security_team_email: str | None = None
+
     metrics_firestore_collection: str = "metrics"
+
+    # Agent Registry (ver registry.py). Colecao central de manifestos --
+    # publicar/descobrir agentes passa a ser dado em Firestore, nao import
+    # hard-coded no orquestrador.
+    agent_registry_collection: str = "agent_registry"
 
     # Camada de triagem Gemma (ver gemma_triage.py). Default e o endereco
     # padrao do `ollama serve` local (convencao do proprio Ollama, nao um

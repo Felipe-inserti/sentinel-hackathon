@@ -22,6 +22,15 @@ definicao, ver CLAUDE.md).
 Continua o MESMO trace iniciado em `ct_listener.py`: extrai o `traceparent`
 dos atributos da mensagem do Pub/Sub e anexa esse contexto antes de abrir
 qualquer span (ver `telemetry.py`).
+
+Descoberta de agente via Agent Registry (ver `registry.py`): este processo
+nao assume mais, hard-coded, qual formato de payload aceita nem que esta
+"versao ativa". Cada mensagem chama `registry.invoke_agent("orchestrator", ...)`,
+que resolve a versao `ACTIVE` publicada em Firestore e valida o payload
+contra o `input_schema` dela antes de qualquer processamento -- payload
+invalido, ou nenhuma versao `ACTIVE` publicada, e rejeitado com erro
+auditavel. O manifesto resolvido e carimbado (`agent_id`/`agent_version`)
+em todo dossie gravado.
 """
 
 from __future__ import annotations
@@ -39,6 +48,7 @@ from opentelemetry import context as otel_context
 from opentelemetry.trace import Span
 from pydantic import BaseModel, Field
 
+import registry
 import telemetry
 from config import settings
 from llm_client import LLMUsage, llm_client
@@ -50,6 +60,14 @@ logger = logging.getLogger("orchestrator")
 SCRAPE_TIMEOUT_SECONDS = 8
 MAX_SCRAPED_CHARS = 6000  # truncagem para nao inflar o custo do prompt
 MAX_INFLIGHT_MESSAGES = 10
+
+# Identidade deste processo no Agent Registry (ver registry.py). NAO e mais
+# hard-coded qual versao/contrato o orquestrador aceita: cada mensagem
+# resolve a versao ACTIVE atual via `registry.invoke_agent` e valida o
+# payload contra o `input_schema` publicado antes de processar -- publicar
+# um manifesto novo (ex: mudar o schema aceito, depreciar uma versao) nao
+# exige alterar este arquivo.
+AGENT_ID = "orchestrator"
 
 db = firestore.Client()
 publisher = pubsub_v1.PublisherClient()
@@ -229,6 +247,7 @@ def _save_investigation(
     usage: LLMUsage,
     sanitized: SanitizationResult,
     cost_usd: float,
+    agent_manifest: registry.AgentManifest,
 ) -> bool:
     """Persiste o dossie no Firestore e devolve `requires_human_review`
     (requisito: SAFE nunca e automatico quando houve sinal de injecao)."""
@@ -260,6 +279,10 @@ def _save_investigation(
             "pii_redacted": sanitized.pii_redacted,
             "delimiter_escape_attempted": sanitized.delimiter_escape_attempted,
             "requires_human_review": requires_human_review,
+            # Requisito do Agent Registry: todo dossie registra qual agente
+            # e versao o produziu (ver registry.py::invoke_agent).
+            "agent_id": agent_manifest.agent_id,
+            "agent_version": agent_manifest.version,
         }
     )
     return requires_human_review
@@ -287,10 +310,16 @@ def _publish_completed(domain: str, classification: str, confidence: float, cach
         )
 
 
-async def investigate_domain(domain: str, matched_brand: str | None) -> dict[str, Any]:
+async def investigate_domain(
+    domain: str, matched_brand: str | None, agent_manifest: registry.AgentManifest
+) -> dict[str, Any]:
     """Ponto de entrada principal: cache-first, so cai para o LLM se preciso.
 
     Retornar do cache custa 1 leitura no Firestore e ZERO tokens de LLM.
+
+    `agent_manifest` e o manifesto ACTIVE resolvido pelo Agent Registry para
+    esta invocacao (ver `_handle_pubsub_message`) -- carimbado no dossie
+    persistido, nunca decidido aqui.
     """
     with tracer.start_as_current_span("cache.lookup") as span:
         cached = await asyncio.to_thread(_get_cached_investigation, domain)
@@ -327,7 +356,14 @@ async def investigate_domain(domain: str, matched_brand: str | None) -> dict[str
 
     with tracer.start_as_current_span("firestore.persist"):
         requires_human_review = await asyncio.to_thread(
-            _save_investigation, domain, matched_brand, result, usage, sanitized, cost_usd
+            _save_investigation,
+            domain,
+            matched_brand,
+            result,
+            usage,
+            sanitized,
+            cost_usd,
+            agent_manifest,
         )
 
     _publish_completed(domain, result.classification, result.confidence, cache_hit=False)
@@ -357,12 +393,32 @@ async def investigate_domain(domain: str, matched_brand: str | None) -> dict[str
 def _handle_pubsub_message(message: pubsub_v1.subscriber.message.Message, loop: asyncio.AbstractEventLoop) -> None:
     try:
         payload = json.loads(message.data.decode("utf-8"))
-        domain = payload["domain"]
-        matched_brand = payload.get("matched_brand")
-    except (json.JSONDecodeError, KeyError):
-        logger.exception("Mensagem invalida recebida, descartando (nack)")
+    except json.JSONDecodeError:
+        logger.exception("JSON invalido recebido, descartando (nack)")
         message.nack()
         return
+
+    # Descoberta + validacao via Agent Registry -- substitui o acesso
+    # hard-coded a payload["domain"]/payload.get("matched_brand") que
+    # existia aqui antes: agora o formato aceito e o status (ACTIVE vs
+    # DEPRECATED/DISABLED) vem do manifesto publicado em Firestore, nao do
+    # codigo. Payload fora do input_schema publicado, ou nenhuma versao
+    # ACTIVE do agente "orchestrator", e rejeitado aqui com erro auditavel
+    # (logado dentro de invoke_agent) antes de qualquer processamento.
+    with tracer.start_as_current_span("registry.invoke") as span:
+        span.set_attribute("registry.agent_id", AGENT_ID)
+        try:
+            agent_manifest = registry.invoke_agent(AGENT_ID, payload)
+        except (registry.AgentNotFoundError, registry.AgentInvocationError) as exc:
+            span.set_attribute("registry.rejected", True)
+            logger.error("Mensagem rejeitada pelo Agent Registry: %s", exc)
+            message.nack()
+            return
+        span.set_attribute("registry.rejected", False)
+        span.set_attribute("registry.agent_version", agent_manifest.version)
+
+    domain = payload["domain"]
+    matched_brand = payload.get("matched_brand")
 
     # Extrai o traceparent injetado pelo ct_listener.py (se ausente, o
     # extract() do OTel devolve um contexto vazio/valido -- o span abaixo
@@ -372,7 +428,7 @@ def _handle_pubsub_message(message: pubsub_v1.subscriber.message.Message, loop: 
     async def _process() -> None:
         token = otel_context.attach(extracted_ctx)
         try:
-            await investigate_domain(domain, matched_brand)
+            await investigate_domain(domain, matched_brand, agent_manifest)
             message.ack()
         except Exception:
             message.nack()
