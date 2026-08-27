@@ -149,13 +149,31 @@ resource "google_service_account" "dashboard" {
 }
 
 # ---------------------------------------------------------------------------
-# IAM -- ct-listener-sa: so publish no topico de dominios suspeitos.
+# IAM -- ct-listener-sa: publish no topico de dominios suspeitos + Firestore.
 # ---------------------------------------------------------------------------
 
 resource "google_pubsub_topic_iam_member" "ct_listener_publish_suspicious" {
   project = var.project_id
   topic   = var.suspicious_topic_id
   role    = "roles/pubsub.publisher"
+  member  = "serviceAccount:${google_service_account.ct_listener.email}"
+}
+
+# Descoberto por execucao real (nao por leitura de codigo) no boot do run
+# oficial obs-2026-08-27: ct-listener-sa nunca tinha roles/datastore.user --
+# a descricao original desta SA ("permissao minima: so publica no topico")
+# era verdade no Sprint 3, antes de observation_run.py (Etapa C/D) passar a
+# exigir leitura/escrita em observation_runs/{run_id} do proprio
+# ct-listener-job (cursor de polling via save_ct_cursor/load_ct_cursor,
+# checkpoint periodico, guarda de custo). A IAM nunca foi atualizada junto
+# com esse codigo -- 403 PermissionDenied real, capturado em
+# observation_run.get_totals()/save_ct_cursor() ao vivo, cursor/checkpoint
+# nunca persistindo. Mesmo papel de projeto que orchestrator-sa/evidence-sa/
+# takedown-sa ja tem (mesma limitacao de granularidade documentada pra
+# elas -- Firestore nao tem IAM por colecao).
+resource "google_project_iam_member" "ct_listener_firestore" {
+  project = var.project_id
+  role    = "roles/datastore.user"
   member  = "serviceAccount:${google_service_account.ct_listener.email}"
 }
 

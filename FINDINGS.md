@@ -390,3 +390,109 @@ HMAC e `expiresAt`. Isso significa:
 Decisão explícita de não mexer nisso agora — risco de auth a dois dias da
 gravação não vale a pena; documentado aqui como limitação conhecida, não
 como pendência de correção imediata.
+
+## 13. Apagar o Firestore não limpa o Pub/Sub — dossiês fantasma no boot do run oficial (27/08/2026)
+
+Mesmo padrão de outros achados desta sprint (`ct_last_index_processed`,
+`observation_run.py` ausente da imagem): **estado distribuído em dois
+sistemas, limpeza feita em um só.**
+
+Antes de ligar `obs-2026-08-27`, apagamos os 10.227 documentos de
+`investigations` e os 4 documentos de `observation_runs` (medições
+descartáveis + o run acidental `obs-2026-08-26`) — Terraform/gcloud não
+tocam dado do Firestore, então isso era uma limpeza só do Firestore, de
+propósito. O que não consideramos: `sub-evidence` (Pub/Sub) tinha um
+backlog real de milhares de mensagens `investigation-completed`
+publicadas ANTES da limpeza (confirmado por execução: mensagem mais
+antiga espiada tinha `publishTime=2026-08-27T15:59:26Z`, 3h18min antes do
+boot do run oficial), nunca drenado porque o `evidence-collector-job` não
+rodava fazia horas. Retenção de 24h do Pub/Sub — nada tinha expirado
+ainda.
+
+Quando o `evidence-collector-job` foi religado, ele processou essa fila
+antiga primeiro (ordem de chegada no Pub/Sub, não por relevância). Para
+cada mensagem cujo domínio já não existia mais em `investigations`
+(porque apagamos), `_update_dossier_with_evidence`
+(`evidence_agent.py`) grava com `doc_ref.set({...evidence...},
+merge=True)` — que **cria o documento do zero** quando ele não existe.
+Resultado: um dossiê `status=PENDING_HUMAN_REVIEW` só com os campos que o
+evidence-collector escreve (`evidence`, `evidence_agent_id`,
+`evidence_agent_version`, `status`) — sem `classification`,
+`matched_brand`, `confidence`, `reasoning`, `injection_signals`, nada do
+que `orchestrator.py` deveria ter escrito primeiro.
+
+**Medido, não estimado**: de 423 documentos `PENDING_HUMAN_REVIEW` no
+pico, **419 (99,05%) eram esses dossiês fantasma** — só 4 tinham dado de
+investigação completo, e esses 4 eram genuinamente do run oficial (todos
+com `investigated_at` depois de `19:17:46`, o boot do run).
+
+**Risco real pro dashboard, não só sujeira de dado**:
+`ReviewCard.tsx`/`review/[domain]/page.tsx` faziam
+`investigation.injection_signals.length > 0` sem null-check —
+`injection_signals` é um campo que só `orchestrator.py` grava, ausente em
+todo dossiê fantasma. `undefined.length` lança exceção em runtime —
+qualquer revisor abrindo `/review` com um fantasma na fila veria a
+página quebrar, não só um card feio.
+
+### Correção aplicada
+- **Dashboard** (`dashboard/src/components/ReviewCard.tsx`,
+  `dashboard/src/app/(app)/review/[domain]/page.tsx`): guarda
+  `(investigation.injection_signals ?? []).length > 0` nos dois lugares
+  — defesa contra QUALQUER documento malformado, não só fantasma
+  especificamente. Build (`next build`) limpo, redeploy confirmado
+  (`sentinel-dashboard-00004-mcz`, `/review` sem sessão continua
+  redirecionando 307).
+- **Dados**: `sub-evidence` esvaziado via `gcloud pubsub subscriptions
+  seek` pro tempo atual (descarta backlog velho — a investigação
+  original de cada domínio continua intacta em `observation_runs`/nos
+  logs do orchestrator, só a evidência é adiada, nada se perde de
+  verdade). Os 419 documentos fantasma apagados do Firestore (lista
+  completa auditada antes de apagar — nenhum dos 4 dossiês reais do run
+  oficial estava nela). `sub-orchestrator` conferido — **sem
+  contaminação**, backlog vazio o tempo todo, `malicious_confirmed_total`
+  do run oficial não é afetado por esse achado.
+
+### Não corrigido ainda (decisão pendente, tamanho diagnosticado)
+`_update_dossier_with_evidence` continua com o `merge=True` que fabrica
+o documento. Devia checar existência (`doc_ref.update({...})`, que
+lança `NotFound` de verdade quando o documento não existe, em vez de
+`.set(merge=True)`, que nunca lança) e logar+descartar (ack, não nack —
+reentregar não resolve dado que já foi apagado de propósito) em vez de
+fabricar um dossiê fantasma. Tamanho: um método em `evidence_agent.py`
+(troca de `.set()` por `.update()` + `try/except NotFound`, ~15-20
+linhas) e um teste existente reescrito
+(`tests/test_evidence_agent.py::test_update_dossier_with_evidence_merges_and_stamps_agent`,
+hoje afirma literalmente `merge=True`) mais um teste novo pro caminho de
+documento ausente. Pequeno e contido a um arquivo de produção + um de
+teste, sem mudança de schema/infra — não implementado ainda, aguardando
+aprovação explícita.
+
+### Achado adicional: gargalo real de capacidade do evidence-collector
+
+Motivado por uma pergunta de capacidade ("a janela de 1h, 2x/dia dá conta
+do ritmo do run?") — medido depois da limpeza acima, sem contaminação:
+
+| | Taxa medida |
+|---|---|
+| Produção de MALICIOUS (`orchestrator`, 2h08min de run real) | ~440-457/hora |
+| Processamento do `evidence-collector` (~10min de janela limpa, duas amostras) | ~436-481/hora |
+
+As duas taxas são **essencialmente iguais** — o evidence-collector, quando
+ativo, mal acompanha a produção corrente, sem margem real pra drenar
+backlog acumulado fora da janela. Causa raiz encontrada por leitura de
+código, não suposição: `MAX_INFLIGHT_MESSAGES = 5` (`evidence_agent.py`)
+limita o `FlowControl` do Pub/Sub a 5 mensagens simultâneas — com
+Playwright + DNS + TLS + RDAP por domínio MALICIOUS (vários segundos
+cada, mais falhas de rede reais observadas: `ERR_CONNECTION_REFUSED`,
+`ERR_SSL_PROTOCOL_ERROR`, timeouts), 5 é pouco. `evidence-collector-job`
+tem 2 vCPU / 2Gi hoje — subir a concorrência sem subir recurso arrisca
+contenção de CPU/memória (Chromium não é leve), não necessariamente mais
+throughput.
+
+Com a cadência atual (`0 0,12 * * *`, 1h de janela, 2x/dia = 2h
+ativo/24h) contra ~450/hora de produção contínua: produção diária ≈
+10.800, capacidade diária ≈ 900 (2h × ~450/hora) — **deficit de ~9.900
+MALICIOUS/dia não processados dentro da retenção de 24h do Pub/Sub**.
+Não corrigido — decisão de ajuste (mais janelas, janela mais longa, subir
+`MAX_INFLIGHT_MESSAGES` + recurso, ou aceitar perda parcial e documentar)
+pendente, explicitamente não decidida sem aprovação.

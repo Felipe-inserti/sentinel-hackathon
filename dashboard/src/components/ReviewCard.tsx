@@ -53,7 +53,7 @@ export function ReviewCard({ investigation }: { investigation: Investigation }) 
 
         <p className="line-clamp-3 text-xs leading-relaxed text-zinc-400">{investigation.reasoning}</p>
 
-        {investigation.injection_signals.length > 0 && (
+        {(investigation.injection_signals ?? []).length > 0 && (
           <div className="flex flex-wrap gap-1">
             {investigation.injection_signals.map((signal) => (
               <InjectionSignalBadge key={signal} signal={signal} />

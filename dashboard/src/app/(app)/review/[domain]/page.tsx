@@ -68,7 +68,7 @@ export default function InvestigationDetailPage({ params }: { params: Promise<{ 
               Reasoning do modelo ({inv.model})
             </h2>
             <p className="text-sm leading-relaxed text-zinc-300">{inv.reasoning}</p>
-            {inv.injection_signals.length > 0 && (
+            {(inv.injection_signals ?? []).length > 0 && (
               <div className="mt-3 flex flex-wrap gap-1.5">
                 {inv.injection_signals.map((s) => (
                   <InjectionSignalBadge key={s} signal={s} />
