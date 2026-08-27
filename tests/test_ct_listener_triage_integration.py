@@ -4,35 +4,22 @@ Cobrem o roteamento DISCARD/INVESTIGATE/ESCALATE_IMMEDIATE e, principalmente,
 o requisito de aceite explicito: "fail-open comprovado por teste que derruba
 o servico do Gemma" -- aqui o Ollama e derrubado de verdade (via httpx),
 nao so a funcao `triage_batch` mockada em alto nivel.
-"""
+
+Entrada trocada do certstream (`handle_certstream_message`, removido) para
+`ct_rfc6962.ParsedCertEntry` + `ctl._process_certificate_entry` (ver
+sprint de polling RFC 6962) -- o pipeline downstream testado aqui
+(prefiltro -> fila Gemma -> Pub/Sub) e EXATAMENTE o mesmo de antes."""
 
 from __future__ import annotations
 
-import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 import plane1_ingestion.ct_listener as ctl
 import telemetry
 from gemma_triage import TriageBatchOutcome, TriageResult
-
-
-class _DownAsyncClient:
-    """Substitui `httpx.AsyncClient` simulando o servico do Gemma
-    totalmente fora do ar -- toda chamada levanta ConnectionError."""
-
-    def __call__(self, *args, **kwargs):
-        return self
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc):
-        return False
-
-    async def post(self, url, json=None):
-        raise ConnectionError("Gemma Cloud Run esta fora do ar")
+from plane1_ingestion.ct_rfc6962 import ParsedCertEntry
 
 
 @pytest.fixture(autouse=True)
@@ -58,19 +45,19 @@ def _wire_mocks():
     yield published, discards
 
 
-def _certstream_message(domains: list[str]) -> dict:
-    return {
-        "message_type": "certificate_update",
-        "data": {"leaf_cert": {"all_domains": domains, "not_before": time.time() - 120}},
-    }
+def _parsed_entry(domains: list[str]) -> ParsedCertEntry:
+    return ParsedCertEntry(
+        log_index=1,
+        entry_type="x509_entry",
+        domains=domains,
+        certificate_age_seconds=120.0,
+    )
 
 
 @pytest.mark.asyncio
 async def test_gemma_verdicts_route_correctly(_wire_mocks):
     published, discards = _wire_mocks
     import asyncio
-
-    ctl._loop = asyncio.get_running_loop()
 
     async def fake_triage_batch(signals):
         results = {}
@@ -91,14 +78,14 @@ async def test_gemma_verdicts_route_correctly(_wire_mocks):
         )
 
     with patch("plane1_ingestion.ct_listener.triage_batch", fake_triage_batch):
-        msg = _certstream_message(
+        entry = _parsed_entry(
             [
                 "nub4nk-discard-caso.xyz",
                 "nub4nk-investigate-caso.xyz",
                 "nub4nk-escalate-caso.xyz",
             ]
         )
-        ctl.handle_certstream_message(msg, None)
+        await ctl._process_certificate_entry(entry)
         await asyncio.sleep(0.3)
         await ctl._flush_triage_batch()
 
@@ -111,6 +98,23 @@ async def test_gemma_verdicts_route_correctly(_wire_mocks):
     assert discards[0]["gemma_verdict"] == "DISCARD"
 
 
+class _DownAsyncClient:
+    """Substitui `httpx.AsyncClient` simulando o servico do Gemma
+    totalmente fora do ar -- toda chamada levanta ConnectionError."""
+
+    def __call__(self, *args, **kwargs):
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def post(self, url, json=None):
+        raise ConnectionError("Gemma Cloud Run esta fora do ar")
+
+
 @pytest.mark.asyncio
 async def test_fail_open_when_gemma_service_is_down(_wire_mocks):
     """Requisito de aceite: derruba o servico do Gemma de verdade (nivel
@@ -119,11 +123,9 @@ async def test_fail_open_when_gemma_service_is_down(_wire_mocks):
     published, discards = _wire_mocks
     import asyncio
 
-    ctl._loop = asyncio.get_running_loop()
-
     with patch("gemma_triage.httpx.AsyncClient", _DownAsyncClient()):
-        msg = _certstream_message(["nub4nk-servico-fora-do-ar.xyz"])
-        ctl.handle_certstream_message(msg, None)
+        entry = _parsed_entry(["nub4nk-servico-fora-do-ar.xyz"])
+        await ctl._process_certificate_entry(entry)
         await asyncio.sleep(0.3)
         await ctl._flush_triage_batch()
 
@@ -141,8 +143,6 @@ async def test_batch_flushes_automatically_at_max_size(_wire_mocks):
     import asyncio
 
     from config import settings
-
-    ctl._loop = asyncio.get_running_loop()
 
     call_count = 0
 
@@ -163,8 +163,8 @@ async def test_batch_flushes_automatically_at_max_size(_wire_mocks):
 
     with patch("plane1_ingestion.ct_listener.triage_batch", fake_triage_batch):
         domains = [f"nub4nk-lote-{i}.xyz" for i in range(settings.gemma_batch_max_size)]
-        msg = _certstream_message(domains)
-        ctl.handle_certstream_message(msg, None)
+        entry = _parsed_entry(domains)
+        await ctl._process_certificate_entry(entry)
         await asyncio.sleep(0.3)
 
     assert call_count == 1, "o lote deveria ter fechado sozinho ao bater o tamanho maximo"

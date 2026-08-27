@@ -76,7 +76,19 @@ DEFAULT_SIMILARITY_THRESHOLD = 0.82
 
 # Distancia de edicao maxima aceita numa janela deslizante contra a marca,
 # usada para pegar casos tipo "nubank-suporte-oficial.com".
-DEFAULT_MAX_EDIT_DISTANCE = 2
+#
+# Baixado de 2 para 1 (sprint de medicao de custo real, ver FINDINGS.md
+# SS10): medido contra 28.515 escapes REAIS de um run de 31min contra o
+# Certificate Transparency + um corpus sintetico de 5.413 typosquats
+# classicos (homoglyph/insercao/delecao/transposicao/duplo-edit) -- recall
+# e IDENTICO em distance=2 e distance=1 (95.5% antes do fix abaixo, 99.9%
+# vs 99.6% depois dele) porque todo typosquat classico ja e pego pelo
+# caminho de similaridade de token (Levenshtein.ratio >= threshold),
+# independente deste parametro. distance=2 so adicionava ruido: 92% dos
+# escapes reais eram hashes/IDs de infraestrutura legitima de alta entropia
+# (WorkDay, Synology myvolumio, Cloudflare Workers/Pages) colidindo por
+# acaso dentro de 2 edicoes -- nunca ataques de verdade.
+DEFAULT_MAX_EDIT_DISTANCE = 1
 
 
 @dataclass(frozen=True)
@@ -201,6 +213,13 @@ def analyze_domain(
 
     best_score = 0.0
     best_brand: str | None = None
+    # Distancia de edicao QUALIFICADA (<= max_edit_distance) mais proxima
+    # ja vista -- gravada de forma INDEPENDENTE de best_score (ver bug
+    # corrigido abaixo, FINDINGS.md SS10). O sinal do sliding_window e uma
+    # alternativa "OR" ao sinal de similaridade de token, nao um
+    # competidor: mesmo quando o token de outra marca/palavra pontua mais
+    # alto (e ainda assim fica abaixo do limiar de suspeita), um match de
+    # distancia de edicao genuino nao pode ser descartado por isso.
     best_distance: int | None = None
 
     for brand in brands:
@@ -212,11 +231,22 @@ def analyze_domain(
 
         distance = _sliding_window_min_distance(concatenated, brand)
         if distance <= max_edit_distance:
+            # BUG CORRIGIDO (FINDINGS.md SS10): antes, esta atribuicao so
+            # acontecia dentro do "if equivalent_ratio > best_score"
+            # abaixo -- um match de distancia de edicao QUALIFICADO era
+            # descartado sempre que o score de similaridade de token (por
+            # mais que ainda estivesse abaixo do limiar de suspeita) fosse
+            # maior. Recall medido em typosquats sinteticos de "loggi"
+            # (transposicao adjacente, homoglyph) era 0% por causa disso --
+            # independente do VALOR de max_edit_distance escolhido.
+            if best_distance is None or distance < best_distance:
+                best_distance = distance
+                if best_brand is None:
+                    best_brand = brand
             equivalent_ratio = 1 - (distance / max(len(brand), 1))
             if equivalent_ratio > best_score:
                 best_score = equivalent_ratio
                 best_brand = brand
-                best_distance = distance
 
     is_exact_brand_match = best_brand is not None and best_brand in tokens
     is_suspicious = bool(best_brand) and (

@@ -22,9 +22,9 @@ Uso:
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Literal
+from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from evidence_agent import EvidenceBundle
 from registry import AgentManifest, AgentStatus, publish_agent
@@ -50,18 +50,22 @@ class SuspiciousDomainSignal(BaseModel):
     detected_at: float | None = None
 
 
-class CertstreamEvent(BaseModel):
-    """Subconjunto dos campos do evento certstream que `ct_listener.py`
-    realmente le (ver `_extract_domains`/`_extract_certificate_age_seconds`).
-    Documentado por completude do catalogo -- `ct-listener` consome um
-    stream publico externo (websocket do certstream.calidog.io), entao este
-    schema e informativo (o que o agente aceita como entrada de fato), nao
-    uma barreira de validacao aplicada em runtime como a de `orchestrator`
-    -- nao ha um ponto de invocacao controlado (Pub/Sub) para isso do lado
-    da ingestao."""
+class CTLogEntry(BaseModel):
+    """Formato da entrada que `ct_listener.py` realmente consome apos o
+    parsing (ver `plane1_ingestion.ct_rfc6962.ParsedCertEntry`) -- trocado
+    do evento certstream (websocket de terceiro, fora do ar, sem replay)
+    para polling direto do log RFC 6962 (get-sth/get-entries) contra
+    `settings.ct_log_base_url` (Argon2026h2). Documentado por completude do
+    catalogo -- assim como o formato anterior, este schema e informativo
+    (o que o agente le de fato), nao uma barreira de validacao aplicada em
+    runtime como a de `orchestrator`: nao ha um ponto de invocacao
+    controlado (Pub/Sub) para isso do lado da ingestao, so uma API HTTP
+    publica de terceiro (o operador do log)."""
 
-    message_type: str
-    data: dict[str, Any] = Field(default_factory=dict)
+    log_index: int
+    entry_type: Literal["x509_entry", "precert_entry"]
+    domains: list[str]
+    certificate_age_seconds: float | None = None
 
 
 class InvestigationCompletedMessage(BaseModel):
@@ -128,16 +132,25 @@ _NOW = datetime.now(timezone.utc)
 MANIFESTS: tuple[AgentManifest, ...] = (
     AgentManifest(
         agent_id="ct-listener",
-        version="1.0.0",
+        # 1.0.0 consumia o websocket do certstream (documentado como
+        # DEPRECATED, nao apagado -- mesma disciplina do EvidenceCollectionOutput
+        # acima). 1.1.0: fonte trocada para polling RFC 6962 (get-sth/
+        # get-entries) contra UM log (Argon2026h2) -- so o input_schema/
+        # tools_allowed mudam; output_schema (o que chega em
+        # suspicious-domain-detected) fica IDENTICO, por isso minor, nao
+        # major. PENDENTE: esta versao ainda nao foi publicada (rodar este
+        # script exige comando explicito do operador).
+        version="1.1.0",
         owner_team="sentinel-ingestion",
         description=(
-            "Consome o stream publico de Certificate Transparency, aplica o "
-            "prefiltro determinístico (zero LLM) e a triagem em lote via "
-            "Gemma 3 270M, e publica sobreviventes em suspicious-domain-detected."
+            "Le o Certificate Transparency via polling RFC 6962 (get-sth/get-entries) "
+            "contra um log Google (Argon2026h2), aplica o prefiltro determinístico "
+            "(zero LLM) e a triagem em lote via Gemma 3 270M, e publica sobreviventes "
+            "em suspicious-domain-detected."
         ),
-        input_schema=CertstreamEvent.model_json_schema(),
+        input_schema=CTLogEntry.model_json_schema(),
         output_schema=SuspiciousDomainSignal.model_json_schema(),
-        tools_allowed=["certstream.websocket", "pubsub.publish"],
+        tools_allowed=["ct_rfc6962.http_polling", "pubsub.publish"],
         required_permissions=["roles/pubsub.publisher"],
         sla_seconds=5.0,
         status=AgentStatus.ACTIVE,

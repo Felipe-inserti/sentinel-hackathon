@@ -121,6 +121,19 @@ resource "google_cloud_scheduler_job" "ct_listener" {
   schedule    = "0 0 * * 0" # todo domingo 00:00 UTC -- exatamente 168h de intervalo
   time_zone   = "Etc/UTC"
 
+  # Causa raiz do incidente descoberto nesta sessao: o apply da Etapa C+D
+  # criou os 4 jobs deste arquivo ja ENABLED (comportamento padrao do
+  # recurso quando `paused` nao e setado), e ficaram disparando em cron
+  # sob um `observation_run_id` que ninguem pretendia rodar -- descoberto
+  # so quando o orchestrator ja tinha custado ~US$7 de Gemini. `paused`
+  # e atributo real do provider (confirmado via `terraform providers
+  # schema -json`, google v7.45.0 -- nao e so o `state` computed).
+  # Todo apply a partir de agora sobe os 4 jobs PAUSADOS por padrao --
+  # habilitar exige um passo humano explicito (`gcloud scheduler jobs
+  # resume <nome> --location=us-central1`), nunca um efeito colateral de
+  # `terraform apply`.
+  paused = true
+
   http_target {
     uri         = "https://run.googleapis.com/v2/projects/${var.project_id}/locations/${var.region}/jobs/${google_cloud_run_v2_job.ct_listener.name}:run"
     http_method = "POST"
@@ -144,6 +157,19 @@ resource "google_cloud_scheduler_job" "orchestrator" {
   description = "4x/dia (a cada 6h), janela de ~2h (var.worker_timeouts.orchestrator) -- Pub/Sub retem mensagem por 24h, pode ficar desligado fora da janela."
   schedule    = "0 0,6,12,18 * * *" # 00h, 06h, 12h, 18h UTC
   time_zone   = "Etc/UTC"
+
+  # Causa raiz do incidente descoberto nesta sessao: o apply da Etapa C+D
+  # criou os 4 jobs deste arquivo ja ENABLED (comportamento padrao do
+  # recurso quando `paused` nao e setado), e ficaram disparando em cron
+  # sob um `observation_run_id` que ninguem pretendia rodar -- descoberto
+  # so quando o orchestrator ja tinha custado ~US$7 de Gemini. `paused`
+  # e atributo real do provider (confirmado via `terraform providers
+  # schema -json`, google v7.45.0 -- nao e so o `state` computed).
+  # Todo apply a partir de agora sobe os 4 jobs PAUSADOS por padrao --
+  # habilitar exige um passo humano explicito (`gcloud scheduler jobs
+  # resume <nome> --location=us-central1`), nunca um efeito colateral de
+  # `terraform apply`.
+  paused = true
 
   http_target {
     uri         = "https://run.googleapis.com/v2/projects/${var.project_id}/locations/${var.region}/jobs/${google_cloud_run_v2_job.orchestrator.name}:run"
@@ -169,6 +195,19 @@ resource "google_cloud_scheduler_job" "evidence_collector" {
   schedule    = "0 0,12 * * *" # 00h, 12h UTC
   time_zone   = "Etc/UTC"
 
+  # Causa raiz do incidente descoberto nesta sessao: o apply da Etapa C+D
+  # criou os 4 jobs deste arquivo ja ENABLED (comportamento padrao do
+  # recurso quando `paused` nao e setado), e ficaram disparando em cron
+  # sob um `observation_run_id` que ninguem pretendia rodar -- descoberto
+  # so quando o orchestrator ja tinha custado ~US$7 de Gemini. `paused`
+  # e atributo real do provider (confirmado via `terraform providers
+  # schema -json`, google v7.45.0 -- nao e so o `state` computed).
+  # Todo apply a partir de agora sobe os 4 jobs PAUSADOS por padrao --
+  # habilitar exige um passo humano explicito (`gcloud scheduler jobs
+  # resume <nome> --location=us-central1`), nunca um efeito colateral de
+  # `terraform apply`.
+  paused = true
+
   http_target {
     uri         = "https://run.googleapis.com/v2/projects/${var.project_id}/locations/${var.region}/jobs/${google_cloud_run_v2_job.evidence_collector.name}:run"
     http_method = "POST"
@@ -192,6 +231,19 @@ resource "google_cloud_scheduler_job" "takedown_agent" {
   description = "1x/dia, janela curta (var.worker_timeouts.takedown_agent, 15min -- escolha de projeto, nao teto de plataforma) -- reconfirma aprovacoes pendentes; Pub/Sub retem mensagem por 24h."
   schedule    = "0 0 * * *" # 00h UTC, diario
   time_zone   = "Etc/UTC"
+
+  # Causa raiz do incidente descoberto nesta sessao: o apply da Etapa C+D
+  # criou os 4 jobs deste arquivo ja ENABLED (comportamento padrao do
+  # recurso quando `paused` nao e setado), e ficaram disparando em cron
+  # sob um `observation_run_id` que ninguem pretendia rodar -- descoberto
+  # so quando o orchestrator ja tinha custado ~US$7 de Gemini. `paused`
+  # e atributo real do provider (confirmado via `terraform providers
+  # schema -json`, google v7.45.0 -- nao e so o `state` computed).
+  # Todo apply a partir de agora sobe os 4 jobs PAUSADOS por padrao --
+  # habilitar exige um passo humano explicito (`gcloud scheduler jobs
+  # resume <nome> --location=us-central1`), nunca um efeito colateral de
+  # `terraform apply`.
+  paused = true
 
   http_target {
     uri         = "https://run.googleapis.com/v2/projects/${var.project_id}/locations/${var.region}/jobs/${google_cloud_run_v2_job.takedown_agent.name}:run"

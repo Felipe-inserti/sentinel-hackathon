@@ -217,6 +217,58 @@ async def test_checkpoint_loop_returns_immediately_when_inactive():
     await asyncio.wait_for(obs.checkpoint_loop(), timeout=1.0)
 
 
+# --- cursor do polling RFC 6962 (troca do certstream) ------------------------
+
+
+def test_save_ct_cursor_is_noop_without_active_run(monkeypatch):
+    fake_db = MagicMock()
+    monkeypatch.setattr(obs, "_db", fake_db)
+    obs.save_ct_cursor(12345)
+    fake_db.collection.assert_not_called()
+
+
+def test_load_ct_cursor_returns_none_without_active_run():
+    assert obs.load_ct_cursor() is None
+
+
+def test_load_ct_cursor_returns_none_when_never_saved(monkeypatch):
+    _activate(monkeypatch)
+    monkeypatch.setattr(obs, "get_totals", lambda: {})
+    assert obs.load_ct_cursor() is None
+
+
+def test_save_ct_cursor_writes_absolute_value_not_increment(monkeypatch):
+    """Ao contrario de bump(), isto e um VALOR (proximo indice), nao um
+    contador -- nao pode usar firestore.Increment."""
+    _activate(monkeypatch, "obs-2026-08-27")
+    fake_db = MagicMock()
+    monkeypatch.setattr(obs, "_db", fake_db)
+    doc_ref = fake_db.collection.return_value.document.return_value
+
+    obs.save_ct_cursor(999_888_777)
+
+    doc_ref.set.assert_called_once()
+    payload, kwargs = doc_ref.set.call_args
+    assert payload[0][obs._CT_CURSOR_FIELD] == 999_888_777
+    assert not isinstance(payload[0][obs._CT_CURSOR_FIELD], obs.firestore.Increment)
+    assert payload[0]["run_id"] == "obs-2026-08-27"
+    assert kwargs["merge"] is True
+
+
+def test_save_ct_cursor_never_raises_when_firestore_fails(monkeypatch):
+    _activate(monkeypatch)
+    fake_db = MagicMock()
+    fake_db.collection.return_value.document.return_value.set.side_effect = Exception("boom")
+    monkeypatch.setattr(obs, "_db", fake_db)
+    obs.save_ct_cursor(1)  # nao deve levantar
+
+
+def test_load_ct_cursor_round_trips_saved_value(monkeypatch):
+    _activate(monkeypatch)
+    monkeypatch.setattr(obs, "get_totals", lambda: {obs._CT_CURSOR_FIELD: 42})
+    assert obs.load_ct_cursor() == 42
+
+
 # --- alerta de anomalia (item 5) --------------------------------------------
 
 

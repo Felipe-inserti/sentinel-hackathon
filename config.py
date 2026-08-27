@@ -243,5 +243,51 @@ class Settings(BaseSettings):
     # 1 processado = 100% de "escape").
     observation_anomaly_min_sample_size: int = 200
 
+    # Ingestao via polling RFC 6962 (troca do certstream -- ver
+    # plane1_ingestion/ct_rfc6962.py e docstring de ct_listener.py). UM log
+    # so, por decisao explicita de escopo: Argon2026h2, log Google ativo
+    # para o periodo corrente (temporal_interval 2026-07-01/2027-01-01,
+    # confirmado usable em https://www.gstatic.com/ct/log_list/v3/log_list.json).
+    # Default fixo aqui (ao contrario de gemini_model_id) porque, diferente
+    # do modelo, a URL de um log CT especifico foi uma decisao de escopo já
+    # tomada e documentada -- nao um valor que muda a cada deploy.
+    ct_log_base_url: str = "https://ct.googleapis.com/logs/us1/argon2026h2/"
+
+    # Tamanho de lote PEDIDO por get-entries -- o log decide quanto
+    # devolver de verdade (RFC 6962 SS4.6: "the log SHALL return the
+    # maximum number of entries permissible"), verificado ao vivo
+    # devolvendo 20-32 mesmo quando pedimos 1000/2000. O cursor SEMPRE
+    # avanca pelo numero de entradas REALMENTE devolvidas, nunca por este
+    # valor (ver ct_listener.py::run_polling_loop) -- ele so limita o
+    # tamanho maximo pedido por chamada.
+    ct_get_entries_request_size: int = 1000
+
+    ct_http_timeout_seconds: float = 15.0
+
+    # Intervalo de espera quando o cursor alcanca o tree_size atual (nada
+    # novo para ler agora) -- nao e backoff de erro, e o ritmo normal de
+    # poll quando em dia com o log.
+    ct_poll_interval_seconds: float = 5.0
+
+    # Backoff exponencial para erro HTTP transitorio (timeout, 5xx, 429) --
+    # mesma disciplina min/max ja usada para reconexao do certstream (ver
+    # historico de ct_listener.py); nao ha rate limit documentado para
+    # Argon2026h2 (verificado: nenhuma fonte oficial encontrada), entao
+    # este e o padrao defensivo, nao um numero calibrado contra um limite
+    # conhecido.
+    ct_http_backoff_min_seconds: float = 2.0
+    ct_http_backoff_max_seconds: float = 60.0
+
+    # Ingestao paralela (multiplas faixas de indice simultaneas -- ver
+    # ct_listener.py::_ConcurrencyController). Medido ao vivo: 1 faixa so
+    # (~49 entradas/s) fica bem abaixo da vazao real do log (~204/s) --
+    # sequencial puro nunca alcancaria tempo real. Sem rate limit
+    # documentado para Argon2026h2, entao a concorrencia SOBE gradualmente
+    # a partir do minimo e recua no primeiro 429 -- nunca comeca alta.
+    # `_max` e o teto configuravel por env var (pedido explicito); `_min` e
+    # o piso pos-recuo, nunca 0 (perderia paralelismo por completo).
+    ct_fetch_concurrency_min: int = 1
+    ct_fetch_concurrency_max: int = 8
+
 
 settings = Settings()

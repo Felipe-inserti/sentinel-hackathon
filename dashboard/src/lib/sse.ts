@@ -1,4 +1,5 @@
 import "server-only";
+import { Timestamp } from "@google-cloud/firestore";
 
 /**
  * Helper de Server-Sent Events para os Route Handlers de streaming
@@ -8,6 +9,39 @@ import "server-only";
  * navegador como um evento SSE. Ver decisão registrada em
  * src/lib/session.ts sobre por que não há Firestore client-side aqui.
  */
+
+/**
+ * Achado da verificação ponta a ponta (27/08): `orchestrator.py` grava
+ * `investigated_at` como `datetime` Python cru (não `.isoformat()` via
+ * Pydantic `model_dump(mode="json")`, como `evidence_agent.py` faz pra
+ * `collected_at`) -- o Admin SDK do Node devolve isso como um `Timestamp`
+ * do Firestore, que não tem `toJSON()`. `JSON.stringify` direto nele vira
+ * `{"_seconds":...,"_nanoseconds":...}`, e todo `new Date(...)` do lado
+ * cliente (Timeline.tsx, CloudTraceLink.tsx) virava "Invalid Date" --
+ * confirmado rodando contra um dossiê real de produção antes deste fix.
+ *
+ * Normaliza QUALQUER `Timestamp` em qualquer profundidade do payload pra
+ * string ISO 8601, aqui no único ponto por onde os dois streams
+ * (/api/stream/queue, /api/stream/investigation/[domain]) passam --
+ * cobre `investigated_at` hoje e qualquer campo Timestamp futuro, sem
+ * precisar mudar `orchestrator.py` nem fazer backfill dos documentos já
+ * gravados (a conversão acontece na leitura, não na escrita).
+ */
+function normalizeTimestamps(value: unknown): unknown {
+  if (value instanceof Timestamp) {
+    return value.toDate().toISOString();
+  }
+  if (Array.isArray(value)) {
+    return value.map(normalizeTimestamps);
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, v]) => [key, normalizeTimestamps(v)])
+    );
+  }
+  return value;
+}
+
 export function sseResponse(
   subscribe: (send: (data: unknown) => void, signal: AbortSignal) => () => void
 ): Response {
@@ -18,7 +52,7 @@ export function sseResponse(
     start(controller) {
       const send = (data: unknown) => {
         try {
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(normalizeTimestamps(data))}\n\n`));
         } catch {
           // Controller já fechado (cliente desconectou entre o snapshot
           // chegar e o enqueue rodar) -- ignora, o cleanup abaixo já cuida.

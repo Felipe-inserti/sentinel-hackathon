@@ -223,6 +223,54 @@ async def checkpoint_loop() -> None:
         await asyncio.to_thread(record_checkpoint)
 
 
+# --- Cursor do polling RFC 6962 (troca do certstream) -----------------------
+
+# Nome do campo no MESMO documento `observation_runs/{run_id}` -- pedido
+# explicito: "cursor persistido no checkpoint que ja existe na Etapa C", nao
+# uma segunda colecao/documento so para isso. Um `set(merge=True)` comum
+# (nao `firestore.Increment`, ver `bump()` acima) porque isto e um VALOR
+# absoluto (o proximo indice a ler), nao um contador que soma.
+_CT_CURSOR_FIELD = "ct_last_index_processed"
+
+
+def save_ct_cursor(next_index: int) -> None:
+    """Persiste o proximo indice a ler do log CT. No-op se nenhum run
+    estiver ativo -- MESMA limitacao documentada no modulo inteiro: fora de
+    uma observacao deliberada (`OBSERVATION_RUN_ID` setado), o cursor nao
+    sobrevive a um restart e `ct_listener.py` volta a comecar do tree_size
+    atual (nunca do zero -- ver `plane1_ingestion/ct_listener.py`). Chamada
+    SINCRONA/bloqueante, mesma convencao de `bump()`."""
+    if not is_active():
+        return
+    try:
+        _run_doc_ref().set(
+            {
+                _CT_CURSOR_FIELD: next_index,
+                "run_id": settings.observation_run_id,
+                "last_updated_at": datetime.now(timezone.utc),
+            },
+            merge=True,
+        )
+    except Exception:
+        logger.exception(
+            "Falha ao gravar cursor CT (indice %d) em observation_runs/%s",
+            next_index,
+            settings.observation_run_id,
+        )
+
+
+def load_ct_cursor() -> int | None:
+    """Le o ultimo cursor persistido. `None` se nenhum run estiver ativo OU
+    se o campo ainda nao existir (primeiro boot deste run) -- em ambos os
+    casos, `ct_listener.py` interpreta `None` como "comeca do tree_size
+    atual", nunca do indice 0."""
+    if not is_active():
+        return None
+    totals = get_totals()
+    value = totals.get(_CT_CURSOR_FIELD)
+    return int(value) if value is not None else None
+
+
 # --- Alerta de anomalia (item 5) -------------------------------------------
 
 
