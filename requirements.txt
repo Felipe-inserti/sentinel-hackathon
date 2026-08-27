@@ -1,4 +1,3 @@
-certstream
 google-cloud-pubsub
 google-cloud-firestore
 google-cloud-storage
@@ -25,6 +24,17 @@ opentelemetry-resourcedetector-gcp
 playwright==1.62.0  # screenshot full-page headless, navegacao restrita ao dominio alvo
 dnspython           # DNS A/AAAA/NS/MX/TXT + lookup de ASN via Team Cymru (DNS TXT, sem API key)
 cryptography        # parse da cadeia de certificado TLS (emissor/validade/SANs)
+
+# Etapa C (instrumentacao do run de observacao de 48h) -- pinado pela
+# MESMA razao de playwright acima: `plane1_ingestion/ct_listener.py` passou
+# a importar `certstream.core.CertStreamClient` diretamente (nao so o
+# `certstream.listen_for_events` publico) para controlar reconexao com
+# backoff exponencial de verdade e medir a lacuna de cada queda -- ver
+# docstring de `_run_certstream_once`. `core.CertStreamClient` nao e API
+# publica documentada do pacote; uma atualizacao futura poderia mudar sua
+# assinatura sem aviso em CHANGELOG. Versao confirmada instalada e testada
+# nesta sessao.
+certstream==1.12
 
 # agent_gateway.py (Sprint 8, Parte A)
 fastapi           # unico servico HTTP sincrono deste projeto alem do dashboard Next.js

@@ -132,6 +132,7 @@ from opentelemetry.trace import Span
 from pydantic import BaseModel
 
 import evidence_agent
+import observation_run
 import registry
 import telemetry
 from config import settings
@@ -956,6 +957,10 @@ async def run_takedown_agent() -> None:
 
 
 if __name__ == "__main__":
+    # Etapa C -- trava adicional: recusa iniciar se uma observacao estiver
+    # ativa com DRY_RUN=false (ver observation_run.enforce_dry_run_lock).
+    # No-op fora de um run de observacao configurado.
+    observation_run.enforce_dry_run_lock()
     try:
         asyncio.run(run_takedown_agent())
     except KeyboardInterrupt:

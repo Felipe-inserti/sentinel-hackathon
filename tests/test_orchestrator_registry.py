@@ -99,7 +99,7 @@ async def test_handle_pubsub_message_valid_payload_invokes_with_resolved_manifes
         await asyncio.sleep(0.2)
 
     fake_invoke.assert_called_once_with("orchestrator", {"domain": "nubank-fake.com", "matched_brand": "nubank"})
-    fake_investigate.assert_called_once_with("nubank-fake.com", "nubank", manifest)
+    fake_investigate.assert_called_once_with("nubank-fake.com", "nubank", manifest, None)
     message.ack.assert_called_once()
     message.nack.assert_not_called()
 

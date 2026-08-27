@@ -115,6 +115,13 @@ _COUNTER_NAMES = (
     "brand_memory_examples_injected_total",
     "brand_memory_estimated_extra_tokens_total",
     "brand_memory_estimated_extra_cost_usd_total",
+    # Etapa C (observation_run.py) -- so os que fazem sentido como contador
+    # OTel/Cloud Monitoring GLOBAL (vida inteira do projeto); os contadores
+    # ESCOPADOS por run de observacao vivem em `observation_runs/{run_id}`
+    # (Firestore, ver observation_run.py), nao aqui.
+    "malicious_confirmed_total",
+    "websocket_disconnects_total",
+    "websocket_gap_seconds_total",
 )
 
 _propagator = TraceContextTextMapPropagator()

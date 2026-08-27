@@ -69,3 +69,20 @@ output "cloud_run_job_names" {
     takedown_agent     = google_cloud_run_v2_job.takedown_agent.name
   }
 }
+
+# --- Etapa B (Scheduler) -----------------------------------------------------
+
+output "scheduler_sa_email" {
+  description = "E-mail da Service Account do Cloud Scheduler (so roles/run.invoker por Job, ver observation_scheduler.tf)."
+  value       = google_service_account.scheduler.email
+}
+
+output "cloud_scheduler_job_names" {
+  description = "Nomes dos 4 Cloud Scheduler jobs criados em observation_scheduler.tf."
+  value = {
+    ct_listener        = google_cloud_scheduler_job.ct_listener.name
+    orchestrator       = google_cloud_scheduler_job.orchestrator.name
+    evidence_collector = google_cloud_scheduler_job.evidence_collector.name
+    takedown_agent     = google_cloud_scheduler_job.takedown_agent.name
+  }
+}

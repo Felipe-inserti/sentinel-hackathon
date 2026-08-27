@@ -13,8 +13,10 @@
  * rodando (nada em repouso, confirmado contra a documentacao oficial
  * nesta sessao) -- voce inicia com `gcloud run jobs execute --async`
  * antes da demo (ver deploy.sh/scripts/demo_up.sh) e cancela depois (ver
- * teardown.sh). `job_task_timeout_seconds` (default 3h) e o teto de
- * "esqueci de cancelar".
+ * teardown.sh). O `timeout` de cada Job abaixo agora vem de
+ * `var.worker_timeouts` (Etapa B, observation_scheduler.tf) -- um valor por
+ * worker, nao mais um teto unico de 3h para os 4. Ver a variavel para o
+ * desenho de janelas e a fonte do teto real de plataforma (168h/7 dias).
  *
  * Reusa as SAs de main.tf (ct-listener-sa/orchestrator-sa/evidence-sa/
  * takedown-sa) -- ja tem exatamente a permissao que cada Job precisa,
@@ -44,7 +46,7 @@ resource "google_cloud_run_v2_job" "ct_listener" {
   template {
     template {
       service_account = google_service_account.ct_listener.email
-      timeout         = "${var.job_task_timeout_seconds}s"
+      timeout         = "${var.worker_timeouts["ct_listener"]}s"
       max_retries     = var.job_max_retries
 
       containers {
@@ -76,6 +78,52 @@ resource "google_cloud_run_v2_job" "ct_listener" {
           value = var.otel_region
         }
 
+        # Etapa D -- env vars da instrumentacao de observacao (Etapa C).
+        # Identicas nos 4 Jobs (ver docstring de var.observation_run_id em
+        # variables.tf) -- OBSERVATION_RUN_ID e o UNICO dynamic (so injetado
+        # quando nao vazio, mesmo padrao de GEMMA_OLLAMA_BASE_URL logo
+        # abaixo): vazio == env var nem existe == Settings.observation_run_id
+        # cai no None default == observation_run.py inteiro vira no-op.
+        env {
+          name  = "OBSERVATION_RUNS_COLLECTION"
+          value = var.observation_runs_collection
+        }
+        env {
+          name  = "OBSERVATION_COST_GUARD_USD_LIMIT"
+          value = tostring(var.observation_cost_guard_usd_limit)
+        }
+        env {
+          name  = "OBSERVATION_CHECKPOINT_INTERVAL_SECONDS"
+          value = tostring(var.observation_checkpoint_interval_seconds)
+        }
+        env {
+          name  = "OBSERVATION_PREFILTER_ESCAPE_RATE_THRESHOLD"
+          value = tostring(var.observation_prefilter_escape_rate_threshold)
+        }
+        env {
+          name  = "OBSERVATION_ANOMALY_MIN_SAMPLE_SIZE"
+          value = tostring(var.observation_anomaly_min_sample_size)
+        }
+        dynamic "env" {
+          for_each = var.observation_run_id != "" ? [var.observation_run_id] : []
+          content {
+            name  = "OBSERVATION_RUN_ID"
+            value = env.value
+          }
+        }
+        # DRY_RUN=true explicito nos 4 Jobs (Etapa D), nao so no
+        # takedown-agent -- mesmo raciocinio do bloco original abaixo
+        # (regra #3 do CLAUDE.md): trocar isso exige alterar este arquivo
+        # (revisavel em PR/plan), nunca uma env var esquecida. ct-listener/
+        # orchestrator/evidence-collector nao leem DRY_RUN hoje (so
+        # takedown_agent.py/observation_run.enforce_dry_run_lock leem), mas
+        # ganham a env var mesmo assim -- consistencia entre os 4 workers,
+        # e pronta para o dia em que outro worker precisar dela.
+        env {
+          name  = "DRY_RUN"
+          value = "true"
+        }
+
         # So injetado quando o servico Gemma ja foi deployado (ver
         # scripts/deploy_gemma_cloudrun.sh e a variavel acima) --
         # dependencia circular real: a URL nao existe no primeiro apply.
@@ -102,7 +150,7 @@ resource "google_cloud_run_v2_job" "orchestrator" {
   template {
     template {
       service_account = google_service_account.orchestrator.email
-      timeout         = "${var.job_task_timeout_seconds}s"
+      timeout         = "${var.worker_timeouts["orchestrator"]}s"
       max_retries     = var.job_max_retries
 
       containers {
@@ -133,6 +181,44 @@ resource "google_cloud_run_v2_job" "orchestrator" {
           name  = "OTEL_REGION"
           value = var.otel_region
         }
+
+        # Etapa D -- env vars da instrumentacao de observacao (Etapa C).
+        # Identicas nos 4 Jobs -- ver comentario completo no bloco de
+        # ct_listener acima (mesma docstring de var.observation_run_id em
+        # variables.tf). orchestrator.py e o UNICO worker que le
+        # OBSERVATION_COST_GUARD_USD_LIMIT de verdade hoje
+        # (observation_run.cost_guard_allows_llm_call).
+        env {
+          name  = "OBSERVATION_RUNS_COLLECTION"
+          value = var.observation_runs_collection
+        }
+        env {
+          name  = "OBSERVATION_COST_GUARD_USD_LIMIT"
+          value = tostring(var.observation_cost_guard_usd_limit)
+        }
+        env {
+          name  = "OBSERVATION_CHECKPOINT_INTERVAL_SECONDS"
+          value = tostring(var.observation_checkpoint_interval_seconds)
+        }
+        env {
+          name  = "OBSERVATION_PREFILTER_ESCAPE_RATE_THRESHOLD"
+          value = tostring(var.observation_prefilter_escape_rate_threshold)
+        }
+        env {
+          name  = "OBSERVATION_ANOMALY_MIN_SAMPLE_SIZE"
+          value = tostring(var.observation_anomaly_min_sample_size)
+        }
+        dynamic "env" {
+          for_each = var.observation_run_id != "" ? [var.observation_run_id] : []
+          content {
+            name  = "OBSERVATION_RUN_ID"
+            value = env.value
+          }
+        }
+        env {
+          name  = "DRY_RUN"
+          value = "true"
+        }
       }
     }
   }
@@ -149,7 +235,7 @@ resource "google_cloud_run_v2_job" "evidence_collector" {
   template {
     template {
       service_account = google_service_account.evidence.email
-      timeout         = "${var.job_task_timeout_seconds}s"
+      timeout         = "${var.worker_timeouts["evidence_collector"]}s"
       max_retries     = var.job_max_retries
 
       containers {
@@ -188,6 +274,46 @@ resource "google_cloud_run_v2_job" "evidence_collector" {
           name  = "EVIDENCE_GCS_BUCKET"
           value = google_storage_bucket.evidence.name
         }
+
+        # Etapa D -- env vars da instrumentacao de observacao (Etapa C).
+        # Identicas nos 4 Jobs -- ver comentario completo no bloco de
+        # ct_listener acima. evidence_agent.py NAO chama observation_run.py
+        # ainda (Etapa C nao instrumentou este worker -- so
+        # ct_listener.py/orchestrator.py/takedown_agent.py) -- injetada
+        # mesmo assim por consistencia entre os 4 workers e para nao exigir
+        # outra mudanca de infra no dia em que evidence-collector ganhar
+        # essa instrumentacao.
+        env {
+          name  = "OBSERVATION_RUNS_COLLECTION"
+          value = var.observation_runs_collection
+        }
+        env {
+          name  = "OBSERVATION_COST_GUARD_USD_LIMIT"
+          value = tostring(var.observation_cost_guard_usd_limit)
+        }
+        env {
+          name  = "OBSERVATION_CHECKPOINT_INTERVAL_SECONDS"
+          value = tostring(var.observation_checkpoint_interval_seconds)
+        }
+        env {
+          name  = "OBSERVATION_PREFILTER_ESCAPE_RATE_THRESHOLD"
+          value = tostring(var.observation_prefilter_escape_rate_threshold)
+        }
+        env {
+          name  = "OBSERVATION_ANOMALY_MIN_SAMPLE_SIZE"
+          value = tostring(var.observation_anomaly_min_sample_size)
+        }
+        dynamic "env" {
+          for_each = var.observation_run_id != "" ? [var.observation_run_id] : []
+          content {
+            name  = "OBSERVATION_RUN_ID"
+            value = env.value
+          }
+        }
+        env {
+          name  = "DRY_RUN"
+          value = "true"
+        }
       }
     }
   }
@@ -204,7 +330,7 @@ resource "google_cloud_run_v2_job" "takedown_agent" {
   template {
     template {
       service_account = google_service_account.takedown.email
-      timeout         = "${var.job_task_timeout_seconds}s"
+      timeout         = "${var.worker_timeouts["takedown_agent"]}s"
       max_retries     = var.job_max_retries
 
       containers {
@@ -234,6 +360,40 @@ resource "google_cloud_run_v2_job" "takedown_agent" {
         env {
           name  = "OTEL_REGION"
           value = var.otel_region
+        }
+
+        # Etapa D -- env vars da instrumentacao de observacao (Etapa C).
+        # Identicas nos 4 Jobs -- ver comentario completo no bloco de
+        # ct_listener acima. takedown_agent.py e o UNICO worker que le
+        # OBSERVATION_RUN_ID para uma decisao de seguranca de verdade
+        # (observation_run.enforce_dry_run_lock, chamado no __main__ --
+        # recusa iniciar se um run estiver ativo com DRY_RUN=false).
+        env {
+          name  = "OBSERVATION_RUNS_COLLECTION"
+          value = var.observation_runs_collection
+        }
+        env {
+          name  = "OBSERVATION_COST_GUARD_USD_LIMIT"
+          value = tostring(var.observation_cost_guard_usd_limit)
+        }
+        env {
+          name  = "OBSERVATION_CHECKPOINT_INTERVAL_SECONDS"
+          value = tostring(var.observation_checkpoint_interval_seconds)
+        }
+        env {
+          name  = "OBSERVATION_PREFILTER_ESCAPE_RATE_THRESHOLD"
+          value = tostring(var.observation_prefilter_escape_rate_threshold)
+        }
+        env {
+          name  = "OBSERVATION_ANOMALY_MIN_SAMPLE_SIZE"
+          value = tostring(var.observation_anomaly_min_sample_size)
+        }
+        dynamic "env" {
+          for_each = var.observation_run_id != "" ? [var.observation_run_id] : []
+          content {
+            name  = "OBSERVATION_RUN_ID"
+            value = env.value
+          }
         }
         # Explicito, nao so o default do codigo (regra #3 do CLAUDE.md --
         # "DRY_RUN=true e o padrao... nunca disparar takedown durante

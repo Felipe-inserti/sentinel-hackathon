@@ -30,12 +30,13 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-import certstream
+from certstream.core import CertStreamClient
 from google.api_core.exceptions import GoogleAPICallError
 from google.cloud import firestore, pubsub_v1
 from opentelemetry import context as otel_context
 from opentelemetry.context import Context
 
+import observation_run
 import telemetry
 from config import settings
 from gemma_triage import DomainSignals, TriageResult, triage_batch
@@ -161,11 +162,18 @@ def _bump_batch(field: str, amount: int | float = 1) -> None:
 def _flush_batch() -> None:
     if not _batch_deltas:
         return
+    deltas = dict(_batch_deltas)
     try:
-        telemetry.flush_metrics_to_firestore(dict(_batch_deltas))
+        telemetry.flush_metrics_to_firestore(deltas)
     except Exception:
         logger.exception("Falha ao espelhar metricas no Firestore, descartando lote")
     _batch_deltas.clear()
+
+    # Etapa C -- mesmo lote, destino SEPARADO (observation_runs/{run_id},
+    # ver observation_run.py): no-op se nenhuma observacao estiver ativa.
+    # Reusa os MESMOS nomes de campo acima -- nao uma segunda convencao.
+    observation_run.bump(deltas)
+    observation_run.check_prefilter_escape_anomaly()
 
 
 def _record_triage_discard(domain: str, assessment: DomainRiskAssessment, result: TriageResult) -> None:
@@ -392,26 +400,96 @@ async def _triage_batch_timer() -> None:
             await _flush_triage_batch()
 
 
-def _run_certstream_blocking() -> None:
-    """Executa o loop bloqueante do certstream. Roda em thread separada via
-    `asyncio.to_thread` para nao travar o event loop."""
-    certstream.listen_for_events(handle_certstream_message, url=CERTSTREAM_URL)
+# Timestamp (`time.monotonic()`) do momento em que a conexao caiu -- `None`
+# enquanto conectado. Usado so para medir a DURACAO da lacuna de cobertura
+# (item explicito do pedido: certstream nao tem replay, todo evento emitido
+# durante a lacuna e PERDIDO -- vira limitacao honesta no FINDINGS, nunca
+# escondida). So um worker de ct-listener roda por processo, entao uma
+# variavel de modulo (sem lock) e suficiente -- os callbacks abaixo rodam
+# todos na MESMA thread (a thread onde `_run_certstream_once` bloqueia em
+# `run_forever`), nunca concorrentes entre si.
+_last_disconnect_monotonic: float | None = None
+
+
+def _on_certstream_open() -> None:
+    """Callback real da lib (`certstream.core.CertStreamClient.__init__`,
+    parametro `on_open`) -- dispara quando o handshake do websocket
+    termina. Se havia uma lacuna aberta (`_last_disconnect_monotonic` != None),
+    essa e a reconexao que a fecha: mede e loga a duracao exata."""
+    global _last_disconnect_monotonic
+    if _last_disconnect_monotonic is None:
+        logger.info("certstream conectado")
+        return
+    gap_seconds = max(time.monotonic() - _last_disconnect_monotonic, 0.0)
+    logger.warning(
+        "certstream RECONECTADO apos lacuna de %.1fs sem cobertura -- "
+        "certstream nao tem replay, eventos emitidos durante a lacuna foram PERDIDOS "
+        "(limitacao honesta de cobertura, ver FINDINGS.md)",
+        gap_seconds,
+    )
+    observation_run.bump({"websocket_disconnects_total": 1, "websocket_gap_seconds_total": gap_seconds})
+    _last_disconnect_monotonic = None
+
+
+def _on_certstream_error(exc: BaseException) -> None:
+    """Callback real da lib (parametro `on_error`) -- dispara em QUALQUER
+    erro da conexao websocket, inclusive os que a lib usada a esconder
+    dentro do proprio loop de retry interno (ver docstring de
+    `_run_certstream_once` abaixo). Marca o INICIO da lacuna, se ainda nao
+    marcado (varios erros podem disparar antes da lib desistir de vez)."""
+    global _last_disconnect_monotonic
+    if _last_disconnect_monotonic is None:
+        _last_disconnect_monotonic = time.monotonic()
+    logger.warning("Erro na conexao certstream: %s", exc)
+
+
+def _run_certstream_once() -> None:
+    """UMA tentativa de conexao -- ao contrario de
+    `certstream.listen_for_events` (a funcao publica do pacote), que tem
+    seu PROPRIO `while True: ... time.sleep(5)` interno (verificado lendo
+    `certstream/core.py` da versao instalada/pinada, 1.12 -- ver
+    requirements.txt): toda reconexao comum acontecia DENTRO dessa funcao,
+    com um delay fixo de 5s, nunca retornando para este processo. Isso
+    tornava o backoff exponencial deste modulo teatro -- so seria
+    exercitado por uma excecao que escapasse do `while True` da lib
+    (raro), nunca por uma queda comum de websocket. Chamar
+    `CertStreamClient` diretamente (classe interna do pacote, nao API
+    publica documentada -- por isso a versao esta PINADA em
+    requirements.txt) devolve o controle de reconexao/backoff para
+    `run_listener_with_reconnect`, e os callbacks `on_open`/`on_error`
+    (esses sim, parametros publicos e documentados) dao visibilidade real
+    de quando a conexao cai e quando volta."""
+    client = CertStreamClient(
+        handle_certstream_message,
+        CERTSTREAM_URL,
+        on_open=_on_certstream_open,
+        on_error=_on_certstream_error,
+    )
+    client.run_forever(ping_interval=15)
 
 
 async def run_listener_with_reconnect() -> None:
+    global _last_disconnect_monotonic
     delay = _RECONNECT_MIN_DELAY_SECONDS
     while True:
         try:
             logger.info("Conectando ao certstream em %s", CERTSTREAM_URL)
-            await asyncio.to_thread(_run_certstream_blocking)
-            logger.warning("Conexao com certstream encerrada inesperadamente")
+            await asyncio.to_thread(_run_certstream_once)
+            logger.warning("Conexao com certstream encerrada")
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.exception("Erro na conexao com certstream")
 
+        if _last_disconnect_monotonic is None:
+            # run_forever() retornou sem passar por _on_certstream_error
+            # (ex: fechamento limpo do lado do servidor, sem erro) -- marca
+            # a lacuna a partir de AGORA mesmo assim, para nao perder o
+            # dado (a proxima reconexao ainda mede e loga a duracao certa).
+            _last_disconnect_monotonic = time.monotonic()
+
         await asyncio.to_thread(_flush_batch)
-        logger.info("Reconectando em %ds", delay)
+        logger.info("Reconectando em %ds (backoff exponencial)", delay)
         await asyncio.sleep(delay)
         delay = min(delay * 2, _RECONNECT_MAX_DELAY_SECONDS)
 
@@ -420,7 +498,9 @@ async def main() -> None:
     global _loop
     _loop = asyncio.get_running_loop()
     try:
-        await asyncio.gather(run_listener_with_reconnect(), _triage_batch_timer())
+        await asyncio.gather(
+            run_listener_with_reconnect(), _triage_batch_timer(), observation_run.checkpoint_loop()
+        )
     except KeyboardInterrupt:
         logger.info("Encerrado pelo usuario")
     finally:

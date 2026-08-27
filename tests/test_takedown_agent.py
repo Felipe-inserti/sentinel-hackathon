@@ -18,12 +18,14 @@ allowlist final e o rate limit por marca."""
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+import observation_run
 import registry
 import takedown_agent as ta
 from llm_client import LLMResult, LLMUsage
@@ -684,3 +686,46 @@ async def test_handle_pubsub_message_unexpected_error_nacks():
 
     message.nack.assert_called_once()
     message.ack.assert_not_called()
+
+
+# --- Etapa C, item 6 -- DRY_RUN travado durante o run de observacao -------
+#
+# `test_process_takedown_approval_dry_run_false_refuses_before_any_llm_call`
+# (acima) ja prova que DRY_RUN=false recusa POR MENSAGEM antes de qualquer
+# chamada ao LLM. Os testes abaixo cobrem a trava ADICIONAL desta etapa
+# (`observation_run.enforce_dry_run_lock`, chamada no `if __name__ ==
+# "__main__"` de takedown_agent.py -- recusa o processo inteiro de INICIAR
+# quando um run de observacao esta ativo com DRY_RUN=false) mais uma prova
+# ESTRUTURAL (nao so comportamental) de que nenhum caminho de codigo pode
+# marcar `sent=True`.
+
+
+def test_enforce_dry_run_lock_blocks_startup_when_observation_active_and_dry_run_false(monkeypatch):
+    monkeypatch.setattr(observation_run.settings, "observation_run_id", "obs-2026-08-28")
+    monkeypatch.setattr(observation_run.settings, "dry_run", False)
+    with pytest.raises(RuntimeError, match="DRY_RUN"):
+        observation_run.enforce_dry_run_lock()
+
+
+def test_enforce_dry_run_lock_allows_startup_when_dry_run_true(monkeypatch):
+    monkeypatch.setattr(observation_run.settings, "observation_run_id", "obs-2026-08-28")
+    monkeypatch.setattr(observation_run.settings, "dry_run", True)
+    observation_run.enforce_dry_run_lock()  # nao levanta
+
+
+def test_no_sent_true_literal_anywhere_in_takedown_source():
+    """Prova ESTRUTURAL, nao so comportamental: nenhum caminho de codigo
+    PODE marcar `sent=True` porque o literal simplesmente nao existe no
+    modulo -- complementa (nao substitui)
+    `test_process_takedown_approval_dry_run_never_marks_anything_sent`
+    (prova em runtime, so exercita os caminhos que o teste chama) e
+    `test_process_takedown_approval_dry_run_false_refuses_before_any_llm_call`
+    (prova que DRY_RUN=false recusa antes de agir)."""
+    source = inspect.getsource(ta)
+    assert "sent=True" not in source
+    assert "sent = True" not in source
+    # Nenhuma biblioteca de entrega real (SMTP/HTTP de envio) e sequer
+    # importada -- so `requests.get` para consultas RDAP (leitura), nunca
+    # um POST/envio de notificacao.
+    assert "smtplib" not in source
+    assert "requests.post" not in source

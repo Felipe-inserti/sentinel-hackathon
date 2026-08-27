@@ -204,5 +204,44 @@ class Settings(BaseSettings):
     agent_gateway_rate_limit_collection: str = "agent_gateway_rate_limits"
     agent_gateway_rate_limit_per_minute: int = 30
 
+    # Etapa C -- instrumentacao do run de observacao de 48h contra o CT
+    # real (ver observation_run.py). Sem default para observation_run_id,
+    # DE PROPOSITO, mesma disciplina de gemini_model_id/
+    # brand_security_team_email: None desliga TODA a instrumentacao desta
+    # etapa (guarda de custo, observation_runs, checkpoint, alerta de
+    # anomalia) sem exigir nenhuma env var nova em dev/teste/CI -- os 214
+    # testes anteriores a esta etapa continuam passando sem tocar em
+    # nenhuma delas. So defina OBSERVATION_RUN_ID (o MESMO valor em TODAS
+    # as execucoes/re-disparos do Cloud Scheduler durante a janela de
+    # observacao, ver infra/observation_scheduler.tf) para ativar -- e o
+    # que torna os contadores "resistentes a re-disparo": todo processo
+    # que compartilha o mesmo run_id soma no MESMO documento Firestore.
+    observation_run_id: str | None = None
+    observation_runs_collection: str = "observation_runs"
+
+    # Teto de gasto acumulado com LLM (Gemini + Gemma) do RUN INTEIRO, nao
+    # por execucao/processo -- ver observation_run.cost_guard_allows_llm_call.
+    # Pedido explicito: "e a unica coisa entre um bug no prefiltro e o meu
+    # teto de orcamento" (US$25 totais do run, ver infra/variables.tf::
+    # monthly_budget_usd) -- ~US$10 deixa folga para Cloud Run/Scheduler/
+    # Firestore/armazenamento no mesmo teto.
+    observation_cost_guard_usd_limit: float = 10.0
+
+    # Intervalo do checkpoint periodico dos contadores acumulados (ver
+    # observation_run.checkpoint_loop) -- 15 minutos, pedido explicito.
+    observation_checkpoint_interval_seconds: float = 900.0
+
+    # Alerta de anomalia (ver observation_run.check_prefilter_escape_anomaly):
+    # fracao de certificados ingeridos que o prefiltro NAO descarta, acima
+    # da qual soa CRITICAL. Default e ESCOLHA DE PROJETO, nao teto de
+    # plataforma verificado -- a tese do projeto (CLAUDE.md) e ~99% de
+    # descarte (~1% suspeito); 5% e uma folga generosa antes do alarme,
+    # ajustavel por env var se o baseline real do run divergir disso.
+    observation_prefilter_escape_rate_threshold: float = 0.05
+    # Amostra minima de certificados ingeridos antes de avaliar a razao
+    # acima -- evita falso alarme logo no inicio do run (ex: 1 suspeito em
+    # 1 processado = 100% de "escape").
+    observation_anomaly_min_sample_size: int = 200
+
 
 settings = Settings()

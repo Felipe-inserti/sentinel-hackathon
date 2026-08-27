@@ -33,6 +33,9 @@ locals {
     # observado neste sprint (ver nota de "quota project" em budget.tf/
     # deploy.sh), mas sem a API habilitada o orcamento falharia de
     # qualquer forma -- as duas causas precisam estar corrigidas juntas.
+    "cloudscheduler.googleapis.com", # Etapa B -- google_cloud_scheduler_job
+    # (observation_scheduler.tf) dispara os 4 Cloud Run Jobs. Sem API
+    # nenhuma habilitada ate esta etapa (nenhum recurso a usava).
   ]
 }
 

@@ -163,7 +163,7 @@ async def test_investigate_domain_resolves_brand_agent_on_cache_miss(monkeypatch
 
     captured = {}
 
-    def _fake_save(domain, matched_brand, result, usage, sanitized, cost_usd, manifest, brand=None):
+    def _fake_save(domain, matched_brand, result, usage, sanitized, cost_usd, manifest, brand=None, detected_at=None):
         captured["brand"] = brand
         return False
 

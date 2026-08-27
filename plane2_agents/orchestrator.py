@@ -74,6 +74,7 @@ from pydantic import BaseModel, Field
 
 import brand_agent
 import brand_memory
+import observation_run
 import registry
 import telemetry
 from config import settings
@@ -316,6 +317,30 @@ async def classify_domain_with_gemini(
 
     with tracer.start_as_current_span("llm.analyze") as span:
         span.set_attribute("llm.short_circuited", False)
+
+        # Etapa C -- guarda de custo do run de observacao (circuit breaker,
+        # ver observation_run.cost_guard_allows_llm_call). No-op (sempre
+        # True) fora de um run de observacao ativo. Checado ANTES da
+        # chamada ao Gemini -- uma recusa aqui gasta 0 tokens, mesmo
+        # espirito do curto-circuito do sanitizer acima.
+        cost_guard_ok = await asyncio.to_thread(observation_run.cost_guard_allows_llm_call)
+        if not cost_guard_ok:
+            result = AnalysisResult(
+                classification="SAFE",
+                confidence=0.0,
+                reasoning=(
+                    "NAO CLASSIFICADO: guarda de custo do run de observacao "
+                    f"'{settings.observation_run_id}' atingiu o teto de "
+                    f"${settings.observation_cost_guard_usd_limit:.2f} antes desta chamada. "
+                    "Requer revisao humana e reprocessamento manual (cache miss "
+                    "permanece registrado como nao investigado ate entao)."
+                ),
+            )
+            usage = LLMUsage(model_id="cost-guard-blocked", input_tokens=0, output_tokens=0, latency_ms=0.0)
+            span.set_attribute("llm.cost_guard_blocked", True)
+            _set_llm_span_attributes(span, result, usage, 0.0)
+            return result, usage, isolated.sanitized, 0.0, memory_usage
+
         llm_result = await llm_client.generate(
             system_prompt=system_prompt,
             untrusted_data=isolated.wrapped_content,
@@ -345,9 +370,18 @@ def _save_investigation(
     cost_usd: float,
     agent_manifest: registry.AgentManifest,
     brand: brand_agent.BrandAgent | None = None,
+    detected_at: float | None = None,
 ) -> bool:
     """Persiste o dossie no Firestore e devolve `requires_human_review`
     (requisito: SAFE nunca e automatico quando houve sinal de injecao).
+
+    `detected_at` (Etapa C -- ver observation_report.py, metrica "tempo
+    medio certificado->dossie") e o timestamp Unix que
+    `ct_listener.py::_publish_suspicious_domain` carimba no payload
+    original (`SuspiciousDomainSignal.detected_at`, ja parte do
+    input_schema publicado -- nao um campo novo no contrato). `None` (cache
+    hit, ou payload antigo sem o campo) simplesmente nao grava a latencia,
+    nunca inventa um valor.
 
     `brand` e o `BrandAgent` resolvido para `matched_brand` (ver
     `brand_agent.discover_brand_agent`), ou `None` se a marca nao tem
@@ -365,7 +399,20 @@ def _save_investigation(
 
     requires_human_review = (
         bool(sanitized.injection_patterns_found) and result.classification == "SAFE"
-    ) or (brand is not None and brand.should_escalate(result.classification, result.confidence))
+    ) or (brand is not None and brand.should_escalate(result.classification, result.confidence)) or (
+        # Etapa C -- um dominio que a guarda de custo bloqueou nunca foi
+        # realmente classificado (o "SAFE" acima e so um valor de
+        # preenchimento do schema): sempre exige revisao humana, nunca
+        # confiar nesse veredito.
+        usage.model_id == "cost-guard-blocked"
+    )
+
+    # Etapa C -- latencia certificado->dossie (observation_report.py). So
+    # calculada quando o payload trouxe `detected_at` (ver docstring acima)
+    # -- None em vez de um valor inventado quando ausente.
+    investigation_latency_seconds = (
+        max(datetime.now(timezone.utc).timestamp() - detected_at, 0.0) if detected_at is not None else None
+    )
 
     doc_ref = db.collection(settings.firestore_collection).document(domain)
     doc_ref.set(
@@ -381,6 +428,8 @@ def _save_investigation(
             "latency_ms": usage.latency_ms,
             "estimated_cost_usd": cost_usd,
             "investigated_at": datetime.now(timezone.utc),
+            "detected_at": detected_at,
+            "investigation_latency_seconds": investigation_latency_seconds,
             "injection_signals": sanitized.injection_patterns_found,
             "pii_redacted": sanitized.pii_redacted,
             "delimiter_escape_attempted": sanitized.delimiter_escape_attempted,
@@ -421,7 +470,10 @@ def _publish_completed(domain: str, classification: str, confidence: float, cach
 
 
 async def investigate_domain(
-    domain: str, matched_brand: str | None, agent_manifest: registry.AgentManifest
+    domain: str,
+    matched_brand: str | None,
+    agent_manifest: registry.AgentManifest,
+    detected_at: float | None = None,
 ) -> dict[str, Any]:
     """Ponto de entrada principal: cache-first, so cai para o LLM se preciso.
 
@@ -445,6 +497,7 @@ async def investigate_domain(
         logger.info("CACHE HIT para %s (economia de 100%% de tokens)", domain)
         telemetry.increment_counter("cache_hits_total")
         await asyncio.to_thread(telemetry.flush_metrics_to_firestore, {"cache_hits_total": 1})
+        await asyncio.to_thread(observation_run.bump, {"cache_hits_total": 1})
         _publish_completed(domain, cached["classification"], cached["confidence"], cache_hit=True)
         return {**cached, "cache_hit": True}
 
@@ -479,7 +532,10 @@ async def investigate_domain(
         logger.exception("Falha ao investigar dominio %s", domain)
         raise
 
-    if usage.model_id != "sanitizer-short-circuit":
+    # Etapa C -- nem o curto-circuito do sanitizer nem um bloqueio da
+    # guarda de custo representam uma chamada real ao Gemini (0 tokens, 0
+    # custo em ambos) -- nenhum dos dois conta como invocacao.
+    if usage.model_id not in ("sanitizer-short-circuit", "cost-guard-blocked"):
         telemetry.increment_counter("llm_invocations_total")
         telemetry.increment_counter(
             "tokens_consumed_total", amount=usage.input_tokens + usage.output_tokens
@@ -511,7 +567,15 @@ async def investigate_domain(
             firestore_deltas["brand_memory_estimated_extra_cost_usd_total"] = (
                 memory_usage.estimated_extra_cost_usd
             )
+        # "MALICIOUS confirmados" (Etapa C, observation_runs) -- so na
+        # classificacao FRESCA desta chamada, nunca em cache hit (ver
+        # ramo de cache acima): contar de novo um dominio ja conhecido
+        # misrepresentaria o que ESTE run especifico descobriu.
+        if result.classification == "MALICIOUS":
+            telemetry.increment_counter("malicious_confirmed_total")
+            firestore_deltas["malicious_confirmed_total"] = 1
         await asyncio.to_thread(telemetry.flush_metrics_to_firestore, firestore_deltas)
+        await asyncio.to_thread(observation_run.bump, firestore_deltas)
 
     with tracer.start_as_current_span("firestore.persist"):
         requires_human_review = await asyncio.to_thread(
@@ -524,6 +588,7 @@ async def investigate_domain(
             cost_usd,
             agent_manifest,
             resolved_brand,
+            detected_at,
         )
 
     _publish_completed(domain, result.classification, result.confidence, cache_hit=False)
@@ -579,6 +644,11 @@ def _handle_pubsub_message(message: pubsub_v1.subscriber.message.Message, loop: 
 
     domain = payload["domain"]
     matched_brand = payload.get("matched_brand")
+    # Etapa C -- "tempo medio certificado->dossie" (observation_report.py).
+    # Ja fazia parte do input_schema publicado (SuspiciousDomainSignal.
+    # detected_at, ver seed_registry.py) mas nunca era lido daqui -- so
+    # existia no payload, sem uso.
+    detected_at = payload.get("detected_at")
 
     # Extrai o traceparent injetado pelo ct_listener.py (se ausente, o
     # extract() do OTel devolve um contexto vazio/valido -- o span abaixo
@@ -588,7 +658,7 @@ def _handle_pubsub_message(message: pubsub_v1.subscriber.message.Message, loop: 
     async def _process() -> None:
         token = otel_context.attach(extracted_ctx)
         try:
-            await investigate_domain(domain, matched_brand, agent_manifest)
+            await investigate_domain(domain, matched_brand, agent_manifest, detected_at)
             message.ack()
         except Exception:
             message.nack()
@@ -609,15 +679,20 @@ async def run_orchestrator() -> None:
     )
     logger.info("Orchestrator escutando em %s", subscription_path)
 
-    try:
-        await asyncio.to_thread(streaming_pull_future.result)
-    except asyncio.CancelledError:
-        streaming_pull_future.cancel()
-        raise
-    except Exception:
-        logger.exception("Stream de Pub/Sub encerrado com erro")
-        streaming_pull_future.cancel()
-        raise
+    async def _pull() -> None:
+        try:
+            await asyncio.to_thread(streaming_pull_future.result)
+        except asyncio.CancelledError:
+            streaming_pull_future.cancel()
+            raise
+        except Exception:
+            logger.exception("Stream de Pub/Sub encerrado com erro")
+            streaming_pull_future.cancel()
+            raise
+
+    # Etapa C -- checkpoint periodico do run de observacao (no-op se
+    # nenhum run estiver ativo, ver observation_run.checkpoint_loop).
+    await asyncio.gather(_pull(), observation_run.checkpoint_loop())
 
 
 if __name__ == "__main__":
