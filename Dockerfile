@@ -54,7 +54,7 @@ ENV PATH="/opt/venv/bin:$PATH" \
 # import.
 COPY config.py llm_client.py registry.py sanitizer.py telemetry.py \
      agent_gateway.py takedown.py takedown_agent.py brand_agent.py \
-     brand_memory.py gemma_triage.py evidence_agent.py ./
+     brand_memory.py gemma_triage.py evidence_agent.py observation_run.py ./
 COPY plane1_ingestion/ ./plane1_ingestion/
 COPY plane2_agents/ ./plane2_agents/
 
