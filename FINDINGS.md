@@ -496,3 +496,59 @@ MALICIOUS/dia não processados dentro da retenção de 24h do Pub/Sub**.
 Não corrigido — decisão de ajuste (mais janelas, janela mais longa, subir
 `MAX_INFLIGHT_MESSAGES` + recurso, ou aceitar perda parcial e documentar)
 pendente, explicitamente não decidida sem aprovação.
+
+## 14. IAM de observabilidade + prefixo real da métrica no Cloud Monitoring (Sprint 2, Stage A, 29/08/2026)
+
+`roles/cloudtrace.agent`/`roles/monitoring.metricWriter` nas 5 SAs
+(`ct-listener-sa`, `orchestrator-sa`, `evidence-sa`, `takedown-sa`,
+`dashboard-sa`) já estavam aplicados de sessão anterior — `terraform
+plan -target=...` (os 10 `google_project_iam_member` de trace/métrica em
+`infra/main.tf`) deu **0 diff**, confirmado de forma independente contra
+a IAM policy real (`gcloud projects get-iam-policy seu-id-unico`), não só
+o state do Terraform.
+
+Isso remove a CAUSA conhecida (falta de papel IAM) mas não prova, por si
+só, que trace/métrica chegam — o histórico deste projeto já mostrou mais
+de uma vez que "o código está correto" e "o dado chega no backend" são
+coisas diferentes (ver item 11 acima). Prova exigida e obtida: publicada
+uma mensagem real em `suspicious-domain-detected` com um `traceparent`
+W3C gerado manualmente (`00-<trace_id>-<span_id>-01`), `orchestrator-job`
+disparado manualmente (imagem antiga, pré-multimodal — não precisou do
+Stage B), execução cancelada logo depois de confirmar o dossiê gravado
+(timeout do Job é 7200s, não podia ficar rodando).
+
+**Trace**: `GET https://cloudtrace.googleapis.com/v1/projects/{project}/traces/{trace_id}`
+devolveu os 7 spans esperados (`cache.lookup`, `scrape.fetch`,
+`brand_memory.inject`, `sanitize.clean`, `llm.analyze`,
+`firestore.persist`, `pubsub.publish`), todos com `parentSpanId` igual ao
+`span_id` que eu tinha injetado manualmente — confirmado por conversão
+hex→decimal exata (`int("5c93a199b3c1759f", 16) ==
+6670853154583704991`), não por inspeção visual. Prova de que o
+`traceparent` atravessa o Pub/Sub pelo mecanismo real do código
+(`telemetry.extract_context(message.attributes)`), não um trace
+coincidente.
+
+**Achado sobre o prefixo da métrica** (o que valia registrar aqui): as
+métricas customizadas do OTel (`llm_invocations_total`,
+`tokens_consumed_total`, `estimated_cost_usd_total`, etc., ver
+`telemetry._COUNTER_NAMES`) **não** aparecem em Cloud Monitoring sob
+`workload.googleapis.com/<nome>` (o prefixo "recomendado" pela doc geral
+de ingestão OTLP — [OTLP metric ingestion overview](https://docs.cloud.google.com/stackdriver/docs/otlp-metrics/overview)).
+Elas aparecem sob **`prometheus.googleapis.com/<nome>/counter`**, com
+`resource.type = "prometheus_target"` e `resource.labels.location` =
+`settings.otel_region` (`us-central1`). Motivo (confirmado contra a doc —
+[v1.metrics reference](https://docs.cloud.google.com/stackdriver/docs/reference/telemetry/v1.metrics)):
+o `Resource` que `telemetry.py` monta (sem indicadores de plataforma
+GCE/GKE — roda em Cloud Run Job, que não se anuncia como tal nos
+atributos padrão do `GoogleCloudResourceDetector` da forma que ativaria
+um mapeamento de monitored-resource nativo) cai no caminho de mapeamento
+Prometheus da Telemetry API, não no caminho `workload.googleapis.com`.
+Consultar pelo prefixo errado (`workload.googleapis.com/...`) devolve
+"Cannot find metric(s)..." — parece com métrica ausente/não exportada,
+mas é só o prefixo errado. Comando de consulta correto documentado em
+`docs/DEMO_COMMANDS.md`.
+
+Valores conferidos batendo exato com a chamada de teste real:
+`llm_invocations_total=1`, `tokens_consumed_total=690` (631 input + 59
+output, mesmo número do log `llm_call ...`), `estimated_cost_usd_total=
+0.0006945` (mesmo valor do span `llm.analyze`).

@@ -358,3 +358,59 @@ comando é direto contra `gemma_triage.triage_batch`, mesma função que
 Ver `docs/DEMO_NUMBERS.md` (próximo item a preparar) para os números de
 baseline, trace_ids e o caso de injeção mais limpo pro cold open — depende
 de consultar Firestore/Cloud Trace reais, não verificável nesta sessão.
+
+## 11. [PRONTO] — Consultar trace e métricas reais (Cloud Trace + Cloud Monitoring)
+
+Verificado por execução real no Sprint 2, Stage A (29/08/2026) — ver
+`FINDINGS.md`, item 14, para o achado completo. **Registre isto antes da
+gravação**: procurar a métrica no prefixo errado ao vivo custa tempo de
+vídeo.
+
+### 11.1 Trace — dado um `trace_id` (32 hex chars, sem os `-`)
+
+```bash
+TOKEN=$(gcloud auth print-access-token)
+curl -s -H "Authorization: Bearer ${TOKEN}" \
+  "https://cloudtrace.googleapis.com/v1/projects/seu-id-unico/traces/<TRACE_ID>" \
+  | python3 -m json.tool
+```
+Onde achar o `trace_id` de uma investigação real: `logging.googleapis.com/trace`
+em qualquer linha de log estruturado do orchestrator/evidence-collector/
+takedown-agent (formato `projects/seu-id-unico/traces/<TRACE_ID>` — pegue
+só o hex final), ou no Console em
+<https://console.cloud.google.com/traces/list?project=seu-id-unico>.
+
+### 11.2 Métricas customizadas — prefixo é `prometheus.googleapis.com`, NÃO `workload.googleapis.com`
+
+O prefixo "recomendado" pela documentação geral de ingestão OTLP
+(`workload.googleapis.com/<nome>`) **não é o que este projeto usa** — o
+`Resource` OTel montado por `telemetry.py` (Cloud Run Job, sem
+indicadores de plataforma GCE/GKE) cai no mapeamento Prometheus da
+Telemetry API. Consultar com o prefixo errado devolve "Cannot find
+metric(s)..." e parece que a métrica não está sendo exportada — não é
+isso, é só o prefixo errado (ver `FINDINGS.md` item 14 para a
+investigação completa).
+
+```bash
+TOKEN=$(gcloud auth print-access-token)
+END=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+START=$(date -u -d '-1 hour' +%Y-%m-%dT%H:%M:%SZ)
+
+# Nomes validos: qualquer contador de telemetry._COUNTER_NAMES (telemetry.py)
+# -- ex: llm_invocations_total, tokens_consumed_total, estimated_cost_usd_total,
+# cache_hits_total, llm_input_image_tokens_total, llm_input_image_cost_usd_total.
+METRIC="llm_invocations_total"
+
+curl -s -G -H "Authorization: Bearer ${TOKEN}" \
+  "https://monitoring.googleapis.com/v3/projects/seu-id-unico/timeSeries" \
+  --data-urlencode "filter=metric.type = \"prometheus.googleapis.com/${METRIC}/counter\"" \
+  --data-urlencode "interval.startTime=${START}" \
+  --data-urlencode "interval.endTime=${END}" \
+  | python3 -m json.tool
+```
+
+Console (mais rápido para mostrar ao vivo no vídeo): Metrics Explorer em
+<https://console.cloud.google.com/monitoring/metrics-explorer?project=seu-id-unico>
+— busque por `prometheus/llm_invocations_total` (o autocomplete do
+Console já usa o prefixo certo, sem precisar digitar `prometheus.googleapis.com/`
+por completo).
