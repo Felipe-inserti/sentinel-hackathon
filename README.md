@@ -1,40 +1,171 @@
+# README.md — estrutura exigida pela submissão
+
+> Este arquivo é o **esqueleto**. Os comandos entre `[ ]` você já tem no
+> `docs/DEMO_COMMANDS.md` e no `deploy.sh` — mova-os para cá.
+>
+> **Exigência do regulamento:** as instruções precisam ser reproduzíveis.
+> Antes de submeter, clone o repositório numa pasta limpa, siga suas próprias
+> instruções do zero e cronometre. Se você travar, o jurado trava.
+
+---
+
 # Sentinel
 
-Monitoramento, detecção e mitigação de campanhas de phishing em tempo
-real para marcas de grande porte no Brasil. Submissão para o hackathon
-"All Things Agentic", trilha Fortified Enterprise Fleet.
+`[ badge do GitHub Actions ]`
 
-Contexto completo do projeto (arquitetura, tese de token economy, stack,
-regras de segurança, sprints já implementados) está em
-[`CLAUDE.md`](CLAUDE.md) — este README não repete esse conteúdo, só
-documenta o comportamento do sistema sob falha.
+Detecção e mitigação de campanhas de phishing em tempo real contra marcas
+brasileiras, a partir do Certificate Transparency.
+
+**Trilha:** Fortified Enterprise Fleet · **Demo:** `[ link do vídeo ]`
+
+---
+
+## O problema
+
+`[ 2 parágrafos — mesmo conteúdo do Devpost ]`
+
+## A tese: cascata de custo
+
+`[ diagrama + as 6 camadas ]`
+
+---
+
+## Spin-up: rodar localmente
+
+### Pré-requisitos
+
+- Python 3.12
+- Conta GCP com billing ativo
+- `gcloud` CLI autenticado
+- Ollama com Gemma (opcional — o sistema faz *fail-open* sem ele)
+
+### Passo a passo
+
+```bash
+git clone https://github.com/Felipe-inserti/sentinel-hackathon
+cd sentinel-hackathon
+
+python3.12 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+.venv/bin/playwright install --with-deps chromium
+
+cp .env.example .env
+# preencha: GCP_PROJECT_ID, GEMINI_MODEL_ID, GCP_LOCATION, OTEL_REGION
+
+.venv/bin/python -m pytest tests/ -q
+# esperado: 345 passed, 3 deselected
+```
+
+### Demo local ponta a ponta
+
+```bash
+# terminal 1 — sobe o alvo de teste
+./demo/phishing-target/serve.sh malicious 8000
+
+# terminal 2 — roda o fluxo completo
+python demo_run_multimodal_flow.py <domínio> --brand bancoteste --simulate-approval
+```
+
+`[ confirme os argumentos exatos contra o arquivo real ]`
+
+---
+
+## Spin-up: deploy na Google Cloud
+
+### 1. APIs e permissões
+
+```bash
+[ comandos de gcloud services enable ]
+```
+
+### 2. Infraestrutura (Terraform)
+
+```bash
+cd infra
+terraform init
+terraform plan  -var="project_id=<seu-projeto>" [ demais vars ]
+terraform apply -var="project_id=<seu-projeto>" [ demais vars ]
+```
+
+### 3. Build e push das imagens
+
+```bash
+./deploy.sh   # [ confirme se cobre as 4 imagens ]
+```
+
+**⚠️ Duas armadilhas documentadas:**
+
+1. As imagens usam tag mutável (`:latest`). O Terraform compara *strings*, não
+   digests — um push novo não gera diff. É preciso
+   `terraform apply -replace=google_cloud_run_v2_job.<job>` para forçar a
+   re-resolução da tag.
+2. Todo `-replace` num Cloud Run Job **derruba o IAM binding** sem sinalizar,
+   porque o plano é calculado antes da destruição. Sempre rode um segundo
+   `terraform apply -target=google_cloud_run_v2_job_iam_member.<binding>` e
+   confirme com `gcloud run jobs get-iam-policy <job> --region=us-central1`.
+
+### 4. Verificação
+
+```bash
+[ comando de trace — docs/DEMO_COMMANDS.md §11.1 ]
+[ comando de métricas — §11.2 ]
+```
+
+Prefixo real das métricas: `prometheus.googleapis.com/<nome>/counter`,
+resource type `prometheus_target`.
+
+---
+
+## Arquitetura
+
+`[ diagrama em swimlanes, com custo anotado nas setas ]`
+
+---
+
+## Mapa: requisito da trilha → arquivo → linha
+
+| Requisito | Implementação | Arquivo |
+|---|---|---|
+| Agent Registry | `agent_registry` no Firestore | `registry.py` |
+| Agent Runtime | 4 Cloud Run Jobs sob demanda | `infra/cloud_run_jobs.tf` |
+| Memory Bank | memória de marca como few-shot | `brand_memory.py` |
+| Agent Identity | 6 Service Accounts, privilégio mínimo | `infra/main.tf` |
+| Agent Gateway | roteamento com policy fechada | `agent_gateway.py` |
+| Model Armor | sanitização adversarial | `sanitizer.py` |
+| Agent Observability | OpenTelemetry → Trace + Monitoring | `telemetry.py` |
+
+`[ preencha as linhas exatas ]`
+
+---
 
 ## O que acontece quando quebra
 
-Nenhum destes é hipotético — cada linha aponta para o teste, o log de uma
-execução real, ou o commit que prova o comportamento. "Verde na suíte" não
-é a mesma coisa que "provado em produção" (ver último item desta tabela).
+| Falha | Comportamento |
+|---|---|
+| Gemma indisponível | *Fail-open* — segue para investigação normal |
+| Site alvo fora do ar | Bundle parcial, pipeline não quebra |
+| Screenshot falha | `visual_analysis_available=false`, segue só com texto |
+| RDAP envenenado | Contato rejeitado, nada é enviado |
+| LLM devolve schema inválido | Retry, depois falha auditável |
+| Mensagem Pub/Sub replicada | Dupla verificação no Firestore rejeita |
+| Injeção no conteúdo raspado | Detectada, vira sinal de maliciosidade |
 
-| Quando isso falha... | ...o sistema faz isso | Prova |
-|---|---|---|
-| **Gemma (triagem em lote) fica indisponível** | Fail-open: todo domínio do lote vira `INVESTIGATE`, nenhum é descartado silenciosamente | `tests/test_ct_listener_triage_integration.py::test_fail_open_when_gemma_service_is_down`, `tests/test_gemma_triage.py`. **Provado em produção**, não só em teste: run real de 31min desta sprint com Ollama fora do ar — `gemma_fallback_total = gemma_triage_total` (100% fail-open), pipeline seguiu até o Gemini normalmente |
-| **certstream (websocket de CT de terceiro) fica fora do ar** | Migrado para polling direto do log RFC 6962 (Argon2026h2) com cursor persistido — uma queda vira atraso temporário, nunca perda permanente (era limitação honesta documentada antes desta sprint) | `plane1_ingestion/ct_rfc6962.py`, `tests/test_ct_rfc6962.py`, `tests/test_ct_listener_polling.py`; histórico da migração no `CLAUDE.md` e no git log |
-| **Rate limit não documentado do log Argon2026h2** | Concorrência de ingestão sobe gradual e recua pela metade no primeiro 429 — nunca fica travada tentando de novo na mesma velocidade | `tests/test_ct_listener_parallel_ingestion.py`. **Provado ao vivo**: duas medições reais desta sprint bateram 429 de verdade (3 eventos cada); concorrência observada oscilando 4→2→1→2 numa corrida e 1→1→1→2→3→4→5 na outra, nunca travou |
-| **Site alvo (evidência) fica fora do ar durante a coleta** | `EvidenceBundle` parcial (`is_partial=True`) — cada etapa que falhou (DNS/TLS/screenshot/RDAP) fica registrada, nunca esconde a lacuna fingindo bundle completo | `evidence_agent.py` (docstring do módulo + campo `is_partial`) |
-| **RDAP devolve contato de abuso envenenado/mal-formado** | Rejeitado — só um único e-mail/URL bem formado é aceito; qualquer coisa com vírgula/ponto-e-vírgula/espaço é tratada como não-resolvível, nunca usada parcialmente | `takedown_agent.py::_is_single_valid_contact`; achado completo em [`docs/RED_TEAM.md`](docs/RED_TEAM.md) (Achado 1) |
-| **LLM devolve JSON fora do schema Pydantic** | Retry com backoff no erro transitório; esgotadas as tentativas, falha de forma auditável (`LLMSchemaValidationError`), nunca aceita um formato parcial/inventado | `llm_client.py::LLMSchemaValidationError`, `_call_with_transient_retry` |
-| **Pub/Sub reentrega a mesma mensagem (at-least-once)** | Cache-first no Firestore: a segunda entrega do mesmo domínio bate no cache (0 tokens gastos) em vez de reinvestigar | `plane2_agents/orchestrator.py::investigate_domain` (checagem `cache.lookup` antes de qualquer chamada de LLM) |
-| **Conteúdo raspado tenta injeção de prompt** | Sanitizado antes do prompt (regex + remoção de caracteres invisíveis Unicode `Cf`); se a injeção for detectada E o veredito do modelo for `SAFE`, isso **vira sinal de suspeita**, não é só neutralizado — força revisão humana obrigatória (um site legítimo não tenta injetar o classificador) | `sanitizer.py`; `plane2_agents/orchestrator.py` (`requires_human_review = injection_patterns_found and classification == "SAFE"`); prova adversarial completa em [`docs/RED_TEAM.md`](docs/RED_TEAM.md) |
-| **Teto de gasto externo do Vertex AI é atingido** | Chamada ao Gemini falha com `403 PERMISSION_DENIED` (`Spend cap breached`) — comportamento observado, não simulado; é um teto do GCP, não do Sentinel, então nenhum código do projeto o contorna ou esconde | Observado ao vivo nesta sprint (`cost_measurement*/orchestrator.log`, run de 27/08/2026) — não é um teste automatizado, é um log real de produção |
+---
 
-### O padrão que mais importa desta lista
+## Segurança
 
-Suíte verde não prova produção. O exemplo mais caro desta sprint: 264
-testes passavam com `observation_run.py` **ausente da imagem Docker** — o
-módulo existia no repositório, tinha cobertura de teste, e mesmo assim
-nunca chegou aos workers, porque o `Dockerfile` usa lista explícita de
-arquivos (não `COPY . .`) e ninguém tinha adicionado a linha nova. Os
-workers em produção crasharam ao importar um módulo que "existia". A
-correção não foi só adicionar a linha — foi passar a confirmar, por
-execução (simular a imagem/checar os arquivos copiados), toda vez que um
-módulo novo é criado, nunca deduzir do `Dockerfile` que ele vai entrar.
+`[ as 7 regras inegociáveis do projeto ]`
+
+## Limitações conhecidas
+
+`[ Firestore sem IAM por coleção · lacuna do ct_listener · nam5 ]`
+
+## Findings
+
+Ver [`FINDINGS.md`](FINDINGS.md) e [`docs/RED_TEAM.md`](docs/RED_TEAM.md).
+
+## Teardown
+
+```bash
+./teardown.sh
+```
