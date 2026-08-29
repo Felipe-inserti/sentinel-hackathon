@@ -1,0 +1,77 @@
+# Sentinel -- imagem DEDICADA de plane2_agents/orchestrator.py (Cloud Run
+# Job, sob demanda -- ver infra/README.md). Sprint multimodal: orchestrator
+# agora abre um browser Playwright real (plane2_agents/page_capture.py,
+# screenshot USADO NA CLASSIFICACAO -- ver ANALISE_SYSTEM_PROMPT_TEMPLATE em
+# orchestrator.py), entao sai da imagem compartilhada `Dockerfile` (que o
+# proprio cabecalho documenta como "SEM Playwright") e ganha uma imagem
+# propria, no MESMO padrao ja estabelecido por `Dockerfile.evidence` para
+# evidence_agent.py.
+#
+# Decisao registrada explicitamente no sprint (Opcao B, aprovada): NAO
+# estender o `Dockerfile` compartilhado (agent-gateway, ct-listener,
+# takedown-agent tambem usam essa imagem -- nenhum dos tres abre browser,
+# entao inflar os tres so por causa do orchestrator seria o mesmo erro que
+# `Dockerfile.evidence` ja existe para evitar). `Dockerfile`/`Dockerfile.evidence`
+# permanecem INTOCADOS por este arquivo.
+#
+# Mesma decisao de base de `Dockerfile.evidence` (ver comentario la para o
+# raciocinio completo): `python:3.12-slim` (Python 3.12 fixado, requisito do
+# projeto) + `playwright install --with-deps chromium` (mecanismo OFICIAL do
+# Playwright, so Chromium -- nunca Firefox/WebKit), em vez da imagem
+# pre-buildada `mcr.microsoft.com/playwright/python` (que traz os tres
+# browsers e fixa sua propria versao de Python, fora do nosso controle).
+#
+# Arquivo criado apenas -- NENHUM `docker build`/`docker push` foi executado
+# nesta sessao (proibido pelo sprint). Build/push real e o Sprint 2 (deploy).
+
+FROM python:3.12-slim AS builder
+
+WORKDIR /build
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r requirements.txt
+
+FROM python:3.12-slim AS runner
+
+WORKDIR /app
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH" \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+# `playwright install --with-deps chromium` roda como ROOT (precisa de
+# `apt-get` pras dependencias de sistema do Chromium) -- ANTES de criar o
+# usuario nao-root. Mesmo comando/mesma ordem de Dockerfile.evidence.
+RUN playwright install --with-deps chromium
+
+RUN groupadd --system sentinel && useradd --system --gid sentinel --create-home sentinel
+
+# Codigo minimo que orchestrator.py de fato importa (verificado nos
+# imports no topo do modulo, incluindo transitivos de brand_agent.py/
+# brand_memory.py/observation_run.py/registry.py -- nenhum deles importa
+# evidence_agent.py) -- nao o conjunto dos 4 processos da imagem
+# compartilhada, essa imagem serve SO o orchestrator.
+COPY config.py llm_client.py registry.py sanitizer.py telemetry.py \
+     brand_agent.py brand_memory.py observation_run.py ./
+COPY plane1_ingestion/ ./plane1_ingestion/
+COPY plane2_agents/ ./plane2_agents/
+
+# Playwright baixa o Chromium pro cache do usuario que rodou `install`
+# (root, acima, em /root/.cache/ms-playwright) -- precisa ficar acessivel
+# ao usuario nao-root que roda o processo. Mesmo padrao de Dockerfile.evidence.
+RUN mkdir -p /home/sentinel/.cache && \
+    cp -r /root/.cache/ms-playwright /home/sentinel/.cache/ms-playwright && \
+    chown -R sentinel:sentinel /home/sentinel/.cache /app
+ENV PLAYWRIGHT_BROWSERS_PATH=/home/sentinel/.cache/ms-playwright
+
+USER sentinel
+
+CMD ["python", "-m", "plane2_agents.orchestrator"]

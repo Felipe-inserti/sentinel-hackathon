@@ -52,11 +52,17 @@ def _memory_entry(domain: str = ri.DEMO_DOMAIN) -> bm.MemoryEntry:
 
 def _patch_common(monkeypatch, *, few_shot_examples):
     """Mocka record_rejection/get_relevant_memories -- garante que nenhuma
-    chamada real ao Firestore acontece."""
+    chamada real ao Firestore acontece. Tambem mocka a captura de tela
+    (Sprint multimodal, ver plane2_agents/page_capture.py) -- sem isso,
+    `classify_domain_with_gemini` (chamada de verdade neste script, so
+    scrape_website e substituido -- ver `_classify_with_fixed_content`)
+    tentaria abrir um Chromium real contra um dominio fake/inexistente em
+    CADA teste, so retornando (via timeout) depois de ~15s por chamada."""
     fake_record = MagicMock(return_value=_memory_entry())
     monkeypatch.setattr(ri.brand_memory, "record_rejection", fake_record)
     fake_get = MagicMock(return_value=few_shot_examples)
     monkeypatch.setattr(ri.brand_memory, "get_relevant_memories", fake_get)
+    monkeypatch.setattr(orch.page_capture, "capture_page_screenshot", AsyncMock(return_value=None))
     return fake_record, fake_get
 
 

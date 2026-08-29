@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+<meta charset="UTF-8">
+<title>BancoTeste -- Sobre Nos (AMBIENTE DE TESTE, Sentinel Security Research)</title>
+<meta name="description" content="Pagina de teste sintetica do projeto Sentinel (hackathon All Things Agentic). Variante BENIGNA da marca ficticia 'BancoTeste' -- conteudo institucional, sem captura de credencial. Usada para provar ausencia de falso positivo.">
+<meta name="robots" content="noindex, nofollow">
+<style>
+  :root {
+    --bt-teal: #0f6b5c;
+    --bt-teal-dark: #0a4a40;
+    --bt-gold: #d9a441;
+    --bt-cream: #f5efe0;
+    --bt-text: #1d1d1d;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: "Segoe UI", Roboto, Arial, sans-serif;
+    background: var(--bt-cream);
+    color: var(--bt-text);
+  }
+  header {
+    background: var(--bt-teal);
+    color: var(--bt-cream);
+    padding: 16px 24px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  header .wordmark { font-size: 22px; font-weight: 700; letter-spacing: 0.5px; }
+  nav {
+    background: var(--bt-teal-dark);
+    padding: 10px 24px;
+    display: flex;
+    gap: 20px;
+  }
+  nav a { color: var(--bt-cream); font-size: 13px; text-decoration: none; opacity: 0.85; }
+  main {
+    max-width: 640px;
+    margin: 40px auto;
+    background: #ffffff;
+    border-radius: 10px;
+    padding: 32px;
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08);
+  }
+  main h1 { font-size: 22px; color: var(--bt-teal-dark); margin-top: 0; }
+  main p { line-height: 1.6; }
+  ul { line-height: 1.8; }
+  footer {
+    max-width: 640px;
+    margin: 0 auto 48px;
+    padding: 16px 24px;
+    font-size: 12px;
+    color: #4a4a4a;
+    border-top: 1px solid #dcd3ba;
+  }
+</style>
+</head>
+<body>
+<header>
+  <svg width="36" height="36" viewBox="0 0 40 40" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Logo BancoTeste">
+    <polygon points="20,2 36,10 36,24 20,38 4,24 4,10" fill="#d9a441" stroke="#f5efe0" stroke-width="2"/>
+    <text x="20" y="27" font-family="Georgia, serif" font-size="19" font-weight="bold" fill="#0a4a40" text-anchor="middle">B</text>
+  </svg>
+  <span class="wordmark">BancoTeste</span>
+</header>
+<nav>
+  <a href="#">Sobre nos</a>
+  <a href="#">Imprensa</a>
+  <a href="#">Trabalhe conosco</a>
+  <a href="#">Contato</a>
+</nav>
+
+<main>
+  <h1>Sobre a BancoTeste</h1>
+  <p>Esta e uma pagina institucional generica, sem nenhum formulario de
+  credencial. O nome "BancoTeste" e proximo do padrao de nomenclatura de
+  instituicoes financeiras, mas o CONTEUDO desta pagina especifica nao pede
+  senha, CPF, cartao nem qualquer dado sensivel.</p>
+
+  <p>Historico ficticio: fundada como projeto de demonstracao para o
+  hackathon "All Things Agentic", a BancoTeste existe apenas para provar
+  que um sistema de deteccao de phishing baseado em analise visual +
+  textual NAO gera falso positivo so por causa da semelhanca do NOME do
+  dominio com o de uma marca financeira -- o veredito correto aqui e
+  "nao malicioso", porque nao ha identidade visual replicada com intuito de
+  enganar nem captura de credencial.</p>
+
+  <h2>O que fazemos (ficticio)</h2>
+  <ul>
+    <li>Publicamos relatorios de pesquisa em seguranca</li>
+    <li>Documentamos boas praticas de deteccao de phishing</li>
+    <li>Colaboramos com times de resposta a incidentes</li>
+  </ul>
+
+  <h2>Contato</h2>
+  <p>Nenhum canal de contato real -- pagina sintetica, sem backend.</p>
+</main>
+
+<footer>
+  <strong>Aviso:</strong> pagina de pesquisa em seguranca do projeto Sentinel
+  (hackathon "All Things Agentic"). "BancoTeste" e uma marca 100% ficticia --
+  nao imita nome, logo, paleta ou identidade visual de nenhuma instituicao
+  financeira real. Esta variante especifica (benigna) nao tem formulario de
+  credencial nenhum -- existe para provar ausencia de falso positivo do
+  detector. Nao coletamos, armazenamos nem transmitimos nenhum dado.
+</footer>
+</body>
+</html>

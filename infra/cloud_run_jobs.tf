@@ -154,14 +154,22 @@ resource "google_cloud_run_v2_job" "orchestrator" {
       max_retries     = var.job_max_retries
 
       containers {
-        image   = var.agents_image
+        # Imagem DEDICADA desde o Sprint multimodal (Dockerfile.orchestrator)
+        # -- orchestrator agora abre um Chromium real para o screenshot
+        # usado na CLASSIFICACAO (plane2_agents/page_capture.py), nao so
+        # evidence-collector. Ver infra/README.md e a docstring de
+        # var.orchestrator_image (variables.tf) para a decisao completa.
+        image   = var.orchestrator_image
         command = ["python"]
         args    = ["-m", "plane2_agents.orchestrator"]
 
         resources {
+          # Chromium headless e memory-hungry -- mesmo perfil de
+          # evidence_collector abaixo (2 vCPU/2Gi, contra 1/1Gi antes do
+          # Sprint multimodal, quando esta imagem nao abria browser).
           limits = {
-            cpu    = "1"
-            memory = "1Gi"
+            cpu    = "2"
+            memory = "2Gi"
           }
         }
 

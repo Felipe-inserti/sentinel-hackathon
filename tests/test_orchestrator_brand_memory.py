@@ -56,6 +56,7 @@ def test_format_few_shot_block_includes_brand_header_and_entries():
 @pytest.mark.asyncio
 async def test_classify_domain_includes_few_shot_in_untrusted_content(monkeypatch):
     monkeypatch.setattr(orch, "scrape_website", lambda url: "conteudo da pagina raspada")
+    monkeypatch.setattr(orch.page_capture, "capture_page_screenshot", AsyncMock(return_value=None))
     captured = {}
 
     async def _fake_generate(*, system_prompt, untrusted_data, response_schema, **kwargs):
@@ -82,6 +83,7 @@ async def test_classify_domain_includes_few_shot_in_untrusted_content(monkeypatc
 @pytest.mark.asyncio
 async def test_classify_domain_without_few_shot_has_zero_memory_usage(monkeypatch):
     monkeypatch.setattr(orch, "scrape_website", lambda url: "conteudo da pagina raspada")
+    monkeypatch.setattr(orch.page_capture, "capture_page_screenshot", AsyncMock(return_value=None))
 
     async def _fake_generate(*, system_prompt, untrusted_data, response_schema, **kwargs):
         assert "DECISOES HUMANAS ANTERIORES" not in system_prompt
@@ -102,6 +104,7 @@ async def test_classify_domain_escape_short_circuit_still_returns_memory_usage(m
     """Mesmo no caminho de escape (0 tokens de LLM), o retorno precisa ter
     a mesma forma (5-tupla) que o caminho normal."""
     monkeypatch.setattr(orch, "scrape_website", lambda url: "conteudo normal")
+    monkeypatch.setattr(orch.page_capture, "capture_page_screenshot", AsyncMock(return_value=None))
 
     fixed_nonce = "nonce-fixo-de-teste"
 

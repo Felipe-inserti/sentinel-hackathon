@@ -62,13 +62,24 @@ variable "artifact_registry_repository_id" {
 }
 
 variable "agents_image" {
-  description = "Imagem Docker (com tag) da build compartilhada dos 3 workers leves (ct-listener, orchestrator, takedown-agent) e do agent-gateway -- ver Dockerfile na raiz do repo. deploy.sh builda e publica esta tag ANTES de aplicar o Terraform. SEM DEFAULT DE PROPOSITO (incidente real neste sprint: um placeholder tipo 'us-central1-docker.pkg.dev/PROJECT_ID/...' foi aceito silenciosamente por um 'terraform apply' manual que esqueceu de passar esta -var, e os 5 recursos foram criados apontando pra uma imagem que nao existe -- so foi descoberto quando os Jobs/Service ja estavam no ar. Sem default, falta-la agora e erro/prompt IMEDIATO, nao um recurso quebrado silencioso). deploy.sh SEMPRE passa esta -var; rodar terraform apply manualmente sem ela e o unico jeito de esquecer, e agora falha alto."
+  description = "Imagem Docker (com tag) da build compartilhada dos 2 workers leves (ct-listener, takedown-agent) e do agent-gateway -- ver Dockerfile na raiz do repo. `orchestrator` SAIU desta imagem no Sprint multimodal (ver var.orchestrator_image abaixo) -- agora abre um browser Playwright real para a classificacao multimodal (plane2_agents/page_capture.py), entao nao se encaixa mais na imagem 'SEM Playwright' (ver cabecalho do Dockerfile). deploy.sh builda e publica esta tag ANTES de aplicar o Terraform. SEM DEFAULT DE PROPOSITO (incidente real neste sprint: um placeholder tipo 'us-central1-docker.pkg.dev/PROJECT_ID/...' foi aceito silenciosamente por um 'terraform apply' manual que esqueceu de passar esta -var, e os 5 recursos foram criados apontando pra uma imagem que nao existe -- so foi descoberto quando os Jobs/Service ja estavam no ar. Sem default, falta-la agora e erro/prompt IMEDIATO, nao um recurso quebrado silencioso). deploy.sh SEMPRE passa esta -var; rodar terraform apply manualmente sem ela e o unico jeito de esquecer, e agora falha alto."
   type        = string
 }
 
 variable "evidence_image" {
   description = "Imagem Docker (com tag) de evidence_agent -- ver Dockerfile.evidence na raiz do repo (base Playwright, so Chromium). Mesmo motivo de agents_image acima -- SEM DEFAULT DE PROPOSITO, mesmo incidente real corrigido neste sprint."
   type        = string
+}
+
+variable "orchestrator_image" {
+  description = "Imagem Docker (com tag) de plane2_agents/orchestrator.py -- ver Dockerfile.orchestrator na raiz do repo (Sprint multimodal: base Playwright/Chromium, MESMO padrao de evidence_image acima -- orchestrator agora captura screenshot para classificacao, nao so evidence-collector). Antes deste sprint, orchestrator usava var.agents_image (imagem compartilhada 'sem Playwright'); saiu de la porque a captura de tela para classificacao (plane2_agents/page_capture.py, screenshot USADO na chamada ao Gemini, nao so persistido como evidencia) exige o mesmo Chromium que evidence_agent.py, e inflar as imagens de ct-listener/takedown-agent/agent-gateway com Chromium so por causa do orchestrator repetiria o erro que Dockerfile.evidence ja existe para evitar. SEM DEFAULT DE PROPOSITO -- mesmo motivo de agents_image/evidence_image acima."
+  type        = string
+}
+
+variable "demo_target_image" {
+  description = "Imagem Docker (com tag) do alvo publico de demo (Sprint 2, Stage D) -- ver Dockerfile.demo-target na raiz do repo (servidor estatico minimo, stdlib, serve os 5 arquivos aprovados de demo/phishing-target/). DIFERENTE dos 3 vars de imagem acima -- este e opcional, com default vazio: e um recurso so-de-demonstracao (nao faz parte do pipeline real de deteccao), entao nao deve bloquear nem exigir uma -var extra em todo `terraform apply`/`deploy.sh` do sistema de producao. Vazio (default) desliga a criacao do Cloud Run Service inteiro (ver `count` em demo_target_service.tf) -- nao um recurso quebrado apontando pra imagem inexistente."
+  type        = string
+  default     = ""
 }
 
 variable "gemini_model_id" {

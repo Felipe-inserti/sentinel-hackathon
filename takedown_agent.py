@@ -120,7 +120,9 @@ import ipaddress
 import json
 import logging
 import re
+import smtplib
 from datetime import datetime, timezone
+from email.message import EmailMessage
 from enum import Enum
 from typing import Any
 
@@ -676,6 +678,75 @@ def _check_and_increment_rate_limit(brand_key: str) -> bool:
     return _run(db.transaction())
 
 
+def _format_evidence_hashes_block(investigation: dict[str, Any]) -> str:
+    """Bloco de texto com os hashes sha256 do dossie de evidencia (Sprint
+    multimodal, item C.4) -- prova de integridade que aparece no e-mail de
+    demo: qualquer pessoa pode conferir que o screenshot/HTML persistidos
+    no GCS (ver evidence_agent.py) sao exatamente os mesmos bytes
+    coletados, nao alterados depois. `evidence` pode estar ausente (dossie
+    ainda nao processado por evidence-collector) -- nesse caso o bloco diz
+    isso explicitamente, nunca inventa um hash."""
+    evidence = investigation.get("evidence") or {}
+    if not evidence:
+        return "Hashes de evidencia: nenhum dossie de evidencia coletado ainda para este dominio."
+
+    lines = ["Hashes de evidencia (sha256, ver evidence_agent.py):"]
+    screenshot = evidence.get("screenshot") or {}
+    if screenshot.get("sha256"):
+        lines.append(f"  - screenshot.png: {screenshot['sha256']}")
+    html_snapshot = evidence.get("html_snapshot") or {}
+    if html_snapshot.get("sha256"):
+        lines.append(f"  - html_snapshot.html: {html_snapshot['sha256']}")
+    manifest_root_hash = evidence.get("manifest_root_hash")
+    if manifest_root_hash:
+        lines.append(f"  - manifest_root_hash (dossie completo): {manifest_root_hash}")
+    if len(lines) == 1:
+        return "Hashes de evidencia: dossie coletado, mas sem nenhum artefato com hash (ver collection_errors)."
+    return "\n".join(lines)
+
+
+def _send_demo_notification(domain: str, to_address: str, investigation: dict[str, Any]) -> tuple[bool, str | None]:
+    """Envio real de e-mail, EXCLUSIVO do caminho de demo
+    (`settings.demo_live_send_allowlist`) -- nunca chamado para nenhum
+    outro dominio (ver `process_takedown_approval`). `to_address` vem
+    SEMPRE de `settings.demo_live_send_allowlist[domain]`, um mapa fixo em
+    config.py -- nunca de RDAP (`resolve_abuse_contacts`) nem de qualquer
+    saida do modelo (`ChannelSelection`/`NoticeDraft`). Mesma garantia da
+    regra de seguranca #2 do CLAUDE.md, tornada explicita para este
+    caminho. Devolve (sucesso, mensagem_de_erro_ou_None) -- nunca levanta,
+    para que o chamador sempre grave um registro de auditoria."""
+    if not settings.demo_smtp_username or not settings.demo_smtp_password:
+        return False, "DEMO_SMTP_USERNAME/DEMO_SMTP_PASSWORD nao configurados"
+
+    msg = EmailMessage()
+    msg["Subject"] = f"[SENTINEL DEMO] Notificacao de teste - {domain}"
+    msg["From"] = settings.demo_smtp_username
+    msg["To"] = to_address
+    msg.set_content(
+        "Este e um envio de DEMONSTRACAO do Sentinel (hackathon All Things Agentic) -- "
+        "nao e um takedown real contra o dominio abaixo.\n\n"
+        f"Dominio investigado: {domain}\n"
+        f"Marca correspondida: {investigation.get('matched_brand')}\n"
+        f"Classificacao: {investigation.get('classification')} "
+        f"(confianca {investigation.get('confidence')})\n"
+        f"Motivo da decisao humana: {investigation.get('decision_rationale')}\n\n"
+        f"{_format_evidence_hashes_block(investigation)}\n\n"
+        "O endereco de destino desta mensagem veio da DEMO_LIVE_SEND_ALLOWLIST "
+        "(config.py), um mapa fixo dominio->email -- nunca de RDAP nem de "
+        "nenhuma saida do modelo que analisou este dominio."
+    )
+
+    try:
+        with smtplib.SMTP(settings.demo_smtp_host, settings.demo_smtp_port, timeout=15) as server:
+            server.starttls()
+            server.login(settings.demo_smtp_username, settings.demo_smtp_password)
+            server.send_message(msg)
+        return True, None
+    except Exception as exc:
+        logger.exception("Falha ao enviar e-mail de demo para %s", to_address)
+        return False, f"{exc.__class__.__name__}: {exc}"[:500]
+
+
 def _current_trace_id() -> str | None:
     span_context = trace.get_current_span().get_span_context()
     if not span_context.is_valid:
@@ -801,28 +872,77 @@ async def process_takedown_approval(
     category = investigation["takedown_channel"]
 
     if not settings.dry_run:
-        logger.error(
-            "TAKEDOWN RECUSADO para %s: DRY_RUN=false, mas envio real ainda nao esta implementado "
-            "(ver takedown.py).",
-            domain,
+        demo_address = settings.demo_live_send_allowlist.get(domain)
+
+        if demo_address is None:
+            # Fora da DEMO_LIVE_SEND_ALLOWLIST: envio real continua nao
+            # implementado, mesmo comportamento de antes desta allowlist
+            # existir -- so a mensagem deixa claro POR QUE (fora da lista,
+            # nao "nunca implementado").
+            logger.error(
+                "TAKEDOWN RECUSADO para %s: DRY_RUN=false, mas o dominio nao esta na "
+                "DEMO_LIVE_SEND_ALLOWLIST -- envio real fora dessa lista continua nao implementado "
+                "(ver takedown.py e docs/DEMO_COMMANDS.md).",
+                domain,
+            )
+            await asyncio.to_thread(
+                _write_audit_record,
+                domain,
+                investigation,
+                category,
+                [],
+                [],
+                agent_manifest,
+                trace_id,
+                rejected=True,
+                rejected_reason="DRY_RUN=false pedido, dominio fora da DEMO_LIVE_SEND_ALLOWLIST",
+            )
+            telemetry.increment_counter("takedown_actions_rejected_total")
+            raise TakedownNotImplementedError(
+                "Envio real fora da DEMO_LIVE_SEND_ALLOWLIST continua nao implementado -- ver "
+                "takedown.py e CLAUDE.md. DRY_RUN=true e o unico modo suportado para qualquer outro "
+                "dominio."
+            )
+
+        # Caminho de demo: dominio na allowlist. O endereco de destino vem
+        # SO de `demo_address` (settings.demo_live_send_allowlist) --
+        # nunca passa por `resolve_abuse_contacts`/RDAP nem por
+        # `select_channels`/`draft_notice` (LLM). Mesma garantia da regra
+        # de seguranca #2 do CLAUDE.md, explicita e restrita a este
+        # caminho de gravacao.
+        with tracer.start_as_current_span("takedown.demo_live_send") as span:
+            span.set_attribute("takedown.demo_domain", domain)
+            span.set_attribute("takedown.demo_address", demo_address)
+            sent_ok, send_error = await asyncio.to_thread(
+                _send_demo_notification, domain, demo_address, investigation
+            )
+            span.set_attribute("takedown.demo_sent", sent_ok)
+
+        record = ChannelExecutionRecord(
+            channel=TechnicalChannel.BRAND_SECURITY_TEAM,
+            resolved_address=demo_address,
+            notice_subject=f"[SENTINEL DEMO] Notificacao de teste - {domain}",
+            notice_body="Corpo gerado por _send_demo_notification -- ver takedown_agent.py.",
+            sent=sent_ok,
+            dry_run=False,
+            response=send_error,
         )
         await asyncio.to_thread(
             _write_audit_record,
             domain,
             investigation,
             category,
-            [],
+            [record],
             [],
             agent_manifest,
             trace_id,
-            rejected=True,
-            rejected_reason="DRY_RUN=false pedido, mas envio real nao implementado",
+            rejected=not sent_ok,
+            rejected_reason=None if sent_ok else f"falha no envio de demo: {send_error}",
         )
-        telemetry.increment_counter("takedown_actions_rejected_total")
-        raise TakedownNotImplementedError(
-            "Envio real de takedown exige integracao de entrega por canal (SMTP/API) que ainda nao "
-            "existe -- ver takedown.py e CLAUDE.md. DRY_RUN=true e o unico modo suportado hoje."
-        )
+        telemetry.increment_counter("takedown_actions_executed_total")
+        if sent_ok:
+            telemetry.increment_counter("demo_live_sends_total")
+        return TakedownExecutionOutput(domain=domain, sent=sent_ok, dry_run=False)
 
     allowed = ALLOWED_CHANNELS_BY_CATEGORY[category]
     evidence = investigation.get("evidence") or {}

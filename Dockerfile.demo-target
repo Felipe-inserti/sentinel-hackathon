@@ -1,0 +1,42 @@
+# Sentinel -- imagem MINIMA do alvo publico de demo (Sprint 2, Stage D).
+#
+# Substitui a tentativa anterior (bucket GCS com website{}, ver
+# infra/demo_target_bucket.tf e FINDINGS.md item 17 -- nao funciona sem
+# Load Balancer + dominio proprio). Um Cloud Run Service da um hostname
+# publico real (https://sentinel-demo-target-hash.a.run.app) SEM path
+# necessario, mesmo mecanismo que sentinel-agent-gateway ja usa.
+#
+# Serve SO os 6 arquivos aprovados explicitamente de demo/phishing-target/
+# -- malicious.html, benign.html, e as 4 variantes de injecao.
+# `malicious_nofooter.html` NUNCA aparece na lista de COPY abaixo, em
+# nenhuma hipotese -- essa variante (sem o rodape de divulgacao de
+# pesquisa em seguranca) fica exclusivamente local, nunca publicada.
+#
+# Stdlib puro (demo/phishing-target/cloud_run_server.py, so http.server)
+# -- nenhuma dependencia nova, imagem final minima.
+
+FROM python:3.12-slim
+
+WORKDIR /app
+
+RUN groupadd --system sentinel && useradd --system --gid sentinel --create-home sentinel
+
+# Lista EXPLICITA e EXAUSTIVA -- os 6 arquivos aprovados (5 do sprint anterior + injection-css-generated.html, aprovado no Stage D para provar deteccao multimodal de injecao CSS-gerada) + o servidor.
+# NUNCA "COPY demo/phishing-target/ ./" (copiaria malicious_nofooter.html
+# tambem).
+COPY demo/phishing-target/malicious.html \
+     demo/phishing-target/benign.html \
+     demo/phishing-target/injection-css-hidden.html \
+     demo/phishing-target/injection-html-comment.html \
+     demo/phishing-target/injection-unicode-tags.html \
+     demo/phishing-target/injection-css-generated.html \
+     demo/phishing-target/cloud_run_server.py \
+     ./
+
+RUN chown -R sentinel:sentinel /app
+USER sentinel
+
+ENV SERVE_AS_ROOT=malicious.html
+EXPOSE 8080
+
+CMD ["python", "cloud_run_server.py"]

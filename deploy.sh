@@ -2,10 +2,12 @@
 #
 # Sentinel - deploy.sh (Sprint 8, Parte B)
 #
-# Sobe o sistema completo do zero: habilita APIs, builda as 2 imagens
-# Docker (agentes leves + evidence_agent/Playwright), aplica o Terraform
-# (Agent Identity + Agent Gateway + Cloud Run Jobs dos 4 workers), e
-# IMPRIME (nunca executa sozinho) os comandos para iniciar os workers.
+# Sobe o sistema completo do zero: habilita APIs, builda as 3 imagens
+# Docker (agentes leves sem Playwright / evidence_agent+Playwright /
+# orchestrator+Playwright -- Sprint multimodal, ver Dockerfile.orchestrator),
+# aplica o Terraform (Agent Identity + Agent Gateway + Cloud Run Jobs dos 4
+# workers), e IMPRIME (nunca executa sozinho) os comandos para iniciar os
+# workers.
 #
 # Idempotente: pode rodar duas vezes seguidas sem quebrar -- cada etapa
 # usa comandos que ja sao idempotentes por natureza (`gcloud builds
@@ -35,6 +37,12 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPOSITORY="sentinel-images"
 AGENTS_IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/sentinel-agents:latest"
 EVIDENCE_IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/sentinel-evidence:latest"
+# Sprint multimodal -- orchestrator saiu de AGENTS_IMAGE (screenshot USADO
+# na classificacao, ver plane2_agents/page_capture.py) para uma imagem
+# propria com Playwright/Chromium, mesmo padrao de EVIDENCE_IMAGE. Ver
+# Dockerfile.orchestrator e a docstring de var.orchestrator_image em
+# infra/variables.tf.
+ORCHESTRATOR_IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/sentinel-orchestrator:latest"
 
 log()  { printf '\033[1;34m[deploy]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[deploy]\033[0m %s\n' "$*"; }
@@ -109,9 +117,9 @@ else
     --description="Imagens do agent-gateway e dos workers Python"
 fi
 
-# --- 3. Build das 2 imagens (Cloud Build -- sem necessidade de Docker local) ---
+# --- 3. Build das 3 imagens (Cloud Build -- sem necessidade de Docker local) ---
 step "3/5 -- Build das imagens (Cloud Build, sem Docker local)"
-log "Imagem 1/2: workers leves + agent-gateway -> ${AGENTS_IMAGE}"
+log "Imagem 1/3: ct-listener + takedown-agent + agent-gateway -> ${AGENTS_IMAGE}"
 # --tag e --config sao MUTUAMENTE EXCLUSIVOS em 'gcloud builds submit'
 # ("At most one of --config | --pack | --tag can be specified", erro real
 # reproduzido ao rodar este script) -- a tag ja vem do campo `images:` do
@@ -129,7 +137,7 @@ options:
   logging: CLOUD_LOGGING_ONLY
 EOF
 
-log "Imagem 2/2: evidence_agent (Playwright/Chromium) -> ${EVIDENCE_IMAGE}"
+log "Imagem 2/3: evidence_agent (Playwright/Chromium) -> ${EVIDENCE_IMAGE}"
 gcloud builds submit . \
   --project "$PROJECT_ID" \
   --config /dev/stdin <<EOF
@@ -138,6 +146,19 @@ steps:
     args: ["build", "-f", "Dockerfile.evidence", "-t", "${EVIDENCE_IMAGE}", "."]
 images:
   - "${EVIDENCE_IMAGE}"
+options:
+  logging: CLOUD_LOGGING_ONLY
+EOF
+
+log "Imagem 3/3: orchestrator (Playwright/Chromium, Sprint multimodal) -> ${ORCHESTRATOR_IMAGE}"
+gcloud builds submit . \
+  --project "$PROJECT_ID" \
+  --config /dev/stdin <<EOF
+steps:
+  - name: "gcr.io/cloud-builders/docker"
+    args: ["build", "-f", "Dockerfile.orchestrator", "-t", "${ORCHESTRATOR_IMAGE}", "."]
+images:
+  - "${ORCHESTRATOR_IMAGE}"
 options:
   logging: CLOUD_LOGGING_ONLY
 EOF
@@ -152,6 +173,7 @@ TF_VARS=(
   -var="region=${REGION}"
   -var="agents_image=${AGENTS_IMAGE}"
   -var="evidence_image=${EVIDENCE_IMAGE}"
+  -var="orchestrator_image=${ORCHESTRATOR_IMAGE}"
 )
 
 log "Gerando plano..."

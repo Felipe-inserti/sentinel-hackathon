@@ -44,3 +44,7 @@ __pycache__/
 !*.tfvars.example
 crash.log
 crash.*.log
+
+# demo/phishing-target/serve.sh copia uma das variantes para index.html em
+# tempo de execucao (Sprint multimodal) -- artefato gerado, nunca a fonte.
+demo/phishing-target/index.html

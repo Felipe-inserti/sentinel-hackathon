@@ -556,10 +556,23 @@ async def _detect_filled_form_fields(page) -> FormFieldSignal:
     return FormFieldSignal(detected=filled > 0, field_count=filled)
 
 
+def _target_url(domain: str) -> str:
+    """`https://{domain}` sempre, EXCETO com `settings.demo_insecure_http`
+    ligado (opt-in explicito, default False, nunca setado em producao) --
+    mesma logica de `plane2_agents.orchestrator._target_url`, duplicada
+    aqui de proposito (2 linhas, sem justificar um modulo compartilhado
+    novo -- ver CLAUDE.md sobre abstracao especulativa). Usado so para
+    apontar a gravacao de demo a um `python -m http.server` local. Ver
+    config.py e docs/DEMO_COMMANDS.md."""
+    if settings.demo_insecure_http:
+        return f"http://{domain}:{settings.demo_local_http_port}"
+    return f"https://{domain}"
+
+
 async def _capture_screenshot_and_form_signal(
     domain: str,
 ) -> tuple[bytes | None, FormFieldSignal, CollectionError | None]:
-    url = f"https://{domain}"
+    url = _target_url(domain)
     try:
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True, timeout=PLAYWRIGHT_TIMEOUT_MS)
@@ -601,7 +614,7 @@ async def collect_evidence(domain: str) -> EvidenceBundle:
             errors.append(err)
 
         with tracer.start_as_current_span("evidence.http_snapshot"):
-            http_response, html_text_raw, err = await asyncio.to_thread(_fetch_http_snapshot, f"https://{domain}")
+            http_response, html_text_raw, err = await asyncio.to_thread(_fetch_http_snapshot, _target_url(domain))
         if err:
             errors.append(err)
 

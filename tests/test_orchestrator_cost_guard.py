@@ -22,6 +22,7 @@ def _sanitized_ok():
 @pytest.mark.asyncio
 async def test_classify_domain_blocked_by_cost_guard_never_calls_llm(monkeypatch):
     monkeypatch.setattr(orch, "scrape_website", lambda url: "conteudo da pagina raspada")
+    monkeypatch.setattr(orch.page_capture, "capture_page_screenshot", AsyncMock(return_value=None))
     monkeypatch.setattr(orch.settings, "observation_run_id", "obs-teste")
     monkeypatch.setattr(orch.settings, "observation_cost_guard_usd_limit", 10.0)
     monkeypatch.setattr(orch.observation_run, "cost_guard_allows_llm_call", lambda: False)
@@ -45,6 +46,7 @@ async def test_classify_domain_not_blocked_when_guard_allows(monkeypatch):
     from llm_client import LLMResult, LLMUsage
 
     monkeypatch.setattr(orch, "scrape_website", lambda url: "conteudo da pagina raspada")
+    monkeypatch.setattr(orch.page_capture, "capture_page_screenshot", AsyncMock(return_value=None))
     monkeypatch.setattr(orch.observation_run, "cost_guard_allows_llm_call", lambda: True)
 
     async def _fake_generate(*, system_prompt, untrusted_data, response_schema, **kwargs):

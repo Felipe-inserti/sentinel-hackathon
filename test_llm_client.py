@@ -34,9 +34,13 @@ def _make_client() -> LLMClient:
     return client
 
 
-def _fake_response(*, parsed=None, text=None, prompt_tokens=10, candidate_tokens=5):
+def _fake_response(
+    *, parsed=None, text=None, prompt_tokens=10, candidate_tokens=5, prompt_tokens_details=None
+):
     usage = SimpleNamespace(
-        prompt_token_count=prompt_tokens, candidates_token_count=candidate_tokens
+        prompt_token_count=prompt_tokens,
+        candidates_token_count=candidate_tokens,
+        prompt_tokens_details=prompt_tokens_details,
     )
     return SimpleNamespace(parsed=parsed, text=text, usage_metadata=usage)
 
@@ -199,3 +203,98 @@ async def test_generate_raises_schema_error_after_max_schema_retries():
         )
 
     assert client._client.aio.models.generate_content.await_count == MAX_SCHEMA_RETRIES + 1
+
+
+# --- Sprint multimodal: image_bytes opcional --------------------------------
+
+
+@pytest.mark.asyncio
+async def test_generate_without_image_keeps_contents_as_plain_string():
+    """`image_bytes=None` (default) preserva o contrato anterior byte a
+    byte -- nenhum chamador existente (takedown_agent.py, eval_triage.py)
+    quebra."""
+    client = _make_client()
+    ok_response = _fake_response(parsed=DummySchema(classification="SAFE"))
+    client._client.aio.models.generate_content = AsyncMock(return_value=ok_response)
+
+    await client.generate(system_prompt="sys", untrusted_data="so texto", response_schema=DummySchema)
+
+    _, kwargs = client._client.aio.models.generate_content.call_args
+    assert kwargs["contents"] == "so texto"
+
+
+@pytest.mark.asyncio
+async def test_generate_with_image_sends_two_parts_same_turn():
+    """`image_bytes` fornecido vira um SEGUNDO Part (inline_data) na MESMA
+    chamada -- mesmo numero de chamadas ao modelo, nao uma requisicao
+    extra."""
+    from google.genai import types as genai_types
+
+    client = _make_client()
+    ok_response = _fake_response(parsed=DummySchema(classification="MALICIOUS"))
+    client._client.aio.models.generate_content = AsyncMock(return_value=ok_response)
+
+    fake_jpeg = b"\xff\xd8\xff\xe0fake-jpeg-bytes"
+    await client.generate(
+        system_prompt="sys",
+        untrusted_data="texto raspado",
+        response_schema=DummySchema,
+        image_bytes=fake_jpeg,
+        image_mime_type="image/jpeg",
+    )
+
+    client._client.aio.models.generate_content.assert_awaited_once()
+    _, kwargs = client._client.aio.models.generate_content.call_args
+    contents = kwargs["contents"]
+    assert isinstance(contents, list)
+    assert len(contents) == 2
+    assert isinstance(contents[0], genai_types.Part)
+    assert isinstance(contents[1], genai_types.Part)
+    assert contents[1].inline_data.data == fake_jpeg
+    assert contents[1].inline_data.mime_type == "image/jpeg"
+
+
+@pytest.mark.asyncio
+async def test_extract_usage_splits_text_and_image_tokens_when_api_reports_them():
+    """`prompt_tokens_details` (ModalityTokenCount) e MEDIDO pela API, nao
+    heuristica -- `_extract_usage` deve refletir exatamente o que veio,
+    nunca recalcular."""
+    from google.genai import types as genai_types
+
+    client = _make_client()
+    details = [
+        SimpleNamespace(modality=genai_types.MediaModality.TEXT, token_count=120),
+        SimpleNamespace(modality=genai_types.MediaModality.IMAGE, token_count=340),
+    ]
+    ok_response = _fake_response(
+        parsed=DummySchema(classification="SAFE"),
+        prompt_tokens=460,
+        prompt_tokens_details=details,
+    )
+    client._client.aio.models.generate_content = AsyncMock(return_value=ok_response)
+
+    result = await client.generate(
+        system_prompt="sys",
+        untrusted_data="texto",
+        response_schema=DummySchema,
+        image_bytes=b"fake",
+    )
+
+    assert result.usage.input_tokens == 460
+    assert result.usage.input_text_tokens == 120
+    assert result.usage.input_image_tokens == 340
+
+
+@pytest.mark.asyncio
+async def test_extract_usage_leaves_split_none_when_api_omits_details():
+    """Chamada so-texto (sem imagem): a API tipicamente nao devolve
+    `prompt_tokens_details` -- `input_text_tokens`/`input_image_tokens`
+    ficam `None` (nao medido), NUNCA 0 inventado."""
+    client = _make_client()
+    ok_response = _fake_response(parsed=DummySchema(classification="SAFE"))
+    client._client.aio.models.generate_content = AsyncMock(return_value=ok_response)
+
+    result = await client.generate(system_prompt="sys", untrusted_data="texto", response_schema=DummySchema)
+
+    assert result.usage.input_text_tokens is None
+    assert result.usage.input_image_tokens is None

@@ -1,0 +1,124 @@
+<!--
+  ATENCAO -- ESTE ARQUIVO NAO TEM O RODAPE DE DIVULGACAO.
+
+  Existe SO para isolar uma variavel de diagnostico (Sprint multimodal,
+  achado do Caso A: visual_brand_match=True + credential_form_present=True
+  e MESMO ASSIM SAFE -- precisamos saber se o rodape de pesquisa em
+  seguranca e a causa unica ou so uma desculpa). Identico a malicious.html,
+  MENOS o <footer>.
+
+  REGRA DE USO -- NAO NEGOCIAVEL:
+    - Servir APENAS via demo/phishing-target/serve.sh (ou python -m
+      http.server) em localhost/127.0.0.1.
+    - NUNCA fazer deploy deste arquivo em qualquer host publico, bucket
+      GCS publico, Cloud Run, Vercel, GitHub Pages, ou qualquer URL
+      alcancavel de fora desta maquina.
+    - NUNCA remover este comentario nem o titulo/meta abaixo que marcam a
+      pagina como ambiente de teste (mesmo sem rodape visivel, o
+      view-source/HTML bruto continua deixando claro que e sintetico).
+    - Nao referenciado por serve.sh como variante padrao -- servir na mao
+      (copiar para index.html num diretorio local) para nao ser
+      confundido com os outros 5 arquivos deste diretorio.
+-->
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+<meta charset="UTF-8">
+<title>BancoTeste -- Acesso a Conta (AMBIENTE DE TESTE, Sentinel Security Research -- SEM RODAPE, SO LOCALHOST)</title>
+<meta name="description" content="Pagina de teste sintetica do projeto Sentinel (hackathon All Things Agentic). Marca ficticia 'BancoTeste' -- nao imita nenhuma instituicao financeira real. Variante DIAGNOSTICA sem rodape -- NUNCA servir fora de localhost.">
+<meta name="robots" content="noindex, nofollow">
+<style>
+  :root {
+    --bt-teal: #0f6b5c;
+    --bt-teal-dark: #0a4a40;
+    --bt-gold: #d9a441;
+    --bt-cream: #f5efe0;
+    --bt-text: #1d1d1d;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: "Segoe UI", Roboto, Arial, sans-serif;
+    background: var(--bt-cream);
+    color: var(--bt-text);
+  }
+  header {
+    background: var(--bt-teal);
+    color: var(--bt-cream);
+    padding: 16px 24px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  header .wordmark {
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+  }
+  main {
+    max-width: 420px;
+    margin: 48px auto;
+    background: #ffffff;
+    border-radius: 10px;
+    padding: 32px;
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08);
+  }
+  main h1 {
+    font-size: 20px;
+    color: var(--bt-teal-dark);
+    margin-top: 0;
+  }
+  label {
+    display: block;
+    font-size: 13px;
+    font-weight: 600;
+    margin: 16px 0 4px;
+    color: var(--bt-teal-dark);
+  }
+  input {
+    width: 100%;
+    padding: 10px 12px;
+    border: 1px solid #cfc6ad;
+    border-radius: 6px;
+    font-size: 14px;
+  }
+  button {
+    margin-top: 24px;
+    width: 100%;
+    padding: 12px;
+    background: var(--bt-gold);
+    color: var(--bt-teal-dark);
+    border: none;
+    border-radius: 6px;
+    font-weight: 700;
+    font-size: 15px;
+    cursor: not-allowed;
+  }
+</style>
+</head>
+<body>
+<header>
+  <svg width="36" height="36" viewBox="0 0 40 40" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Logo BancoTeste">
+    <polygon points="20,2 36,10 36,24 20,38 4,24 4,10" fill="#d9a441" stroke="#f5efe0" stroke-width="2"/>
+    <text x="20" y="27" font-family="Georgia, serif" font-size="19" font-weight="bold" fill="#0a4a40" text-anchor="middle">B</text>
+  </svg>
+  <span class="wordmark">BancoTeste</span>
+</header>
+
+<main>
+  <h1>Acesse sua conta com seguranca</h1>
+  <form id="login-form" action="javascript:void(0);" onsubmit="return false;" autocomplete="off">
+    <label for="cpf">CPF</label>
+    <input type="text" id="cpf" name="cpf" placeholder="000.000.000-00">
+
+    <label for="senha">Senha</label>
+    <input type="password" id="senha" name="senha" placeholder="Sua senha">
+
+    <label for="token">Codigo de verificacao</label>
+    <input type="text" id="token" name="token" placeholder="6 digitos">
+
+    <button type="submit" disabled>Entrar</button>
+  </form>
+</main>
+</body>
+</html>

@@ -552,3 +552,210 @@ Valores conferidos batendo exato com a chamada de teste real:
 `llm_invocations_total=1`, `tokens_consumed_total=690` (631 input + 59
 output, mesmo número do log `llm_call ...`), `estimated_cost_usd_total=
 0.0006945` (mesmo valor do span `llm.analyze`).
+
+## 15. Tag mutável (`:latest`) + Terraform comparando string = deploy que "dá certo" e não deploya nada (Sprint 2, Stage C, 29/08/2026)
+
+Achado ANTES de aplicar, ao investigar se `takedown-agent-job` precisava
+de deploy junto com o `orchestrator-job` no mesmo apply.
+
+`infra/cloud_run_jobs.tf` declara `image = var.agents_image` para
+`ct_listener`, `orchestrator` (antes do Sprint multimodal) e
+`takedown_agent` — e o valor passado é sempre a MESMA string de tag,
+`us-central1-docker.pkg.dev/{project}/sentinel-images/sentinel-agents:latest`,
+nunca um digest (`@sha256:...`). Confirmado por execução
+(`gcloud run jobs describe takedown-agent-job --format="value(spec.template.spec.template.spec.containers[0].image)"`)
+que o Job vivo também guarda essa mesma string sem digest.
+
+**O problema**: Cloud Run resolve uma tag mutável para um digest no
+momento em que o recurso do Job é criado/atualizado, não a cada
+`execute`. Um `docker push` novo para a mesma tag depois disso não é
+pego automaticamente por execuções seguintes do Job já existente — só um
+`gcloud run jobs deploy`/`terraform apply` que efetivamente TOQUE aquele
+recurso força a re-resolução. E como `terraform apply` decide se toca um
+recurso comparando o VALOR do campo `image` no state contra o valor
+planejado — string idêntica, `0 diff` — um apply que rebuilda a imagem
+com `docker push` para a mesma tag e depois roda `terraform apply`
+direcionado a OUTRO Job (ex: só `orchestrator`, que teve o campo `image`
+de fato alterado para `var.orchestrator_image` neste sprint) relata
+sucesso, sem erro nenhum, e **`takedown-agent-job` continua rodando o
+binário antigo indefinidamente** — sem `_format_evidence_hashes_block`
+neste caso especifico, mas o padrão vale para qualquer mudança futura
+que só troque o conteúdo da imagem sem trocar a string da tag.
+
+**Mesma família de falha** dos outros achados silenciosos deste projeto
+(`PERMISSION_DENIED` de trace/métrica sem papel IAM, item 14 acima; o
+sandbox reportando execução de testes que nunca rodaram, ver
+`docs/PREFILTER_THRESHOLD_BEFORE_AFTER.md`/histórico do projeto): **o
+sistema diz que deu certo, e não deu.** Aqui especificamente, nem existe
+uma mensagem de erro para não ler — o Terraform genuinamente não tem
+informação para saber que algo mudou, porque a informação (o digest) não
+está no campo que ele compara.
+
+**Correção aplicada neste sprint**: `terraform apply
+-replace=google_cloud_run_v2_job.takedown_agent` no mesmo apply do
+Stage C — força a recriação/atualização do recurso mesmo com `image`
+textualmente igual, fazendo o Cloud Run re-resolver `:latest` para o
+digest publicado agora. Verificação pós-apply obrigatória (não deduzida
+do "apply completo com sucesso" do Terraform): comparar o digest
+efetivamente em execução em CADA Job (`gcloud run jobs describe
+--format="value(spec.template.spec.template.spec.containers[0].image)"`
+mostra a tag; o digest resolvido de verdade fica no campo
+`status.latestCreatedExecution` ou é obtido rodando uma execução e
+inspecionando o container) contra o digest que o `docker push` reportou.
+
+**Não corrigido, registrado para decisão futura**: isto não é um
+problema só deste apply — é estrutural enquanto `agents_image`/
+`orchestrator_image`/`evidence_image` continuarem sendo tags mutáveis em
+vez de digests. `deploy.sh` (e este fluxo manual) sempre terão esse risco
+em qualquer sprint futuro que rebuilde uma imagem sem mudar a tag. Opção
+mais robusta para o futuro: `deploy.sh` capturar o digest resolvido do
+`docker push`/`gcloud builds submit` e passar
+`image = "...@sha256:..."` para o Terraform em vez da tag — mudança de
+padrão que não foi decidida nem aplicada agora (fora do escopo deste
+sprint, decisão de arquitetura de deploy que merece aprovação própria).
+
+## 16. Domain-lock de `page_capture.py` recebia o campo `domain` cru, não o hostname navegado — bug real, exposto pela demo (Sprint 2, Stage D, 29/08/2026)
+
+Achado ao montar o alvo público do Stage D (bucket GCS servindo
+`demo/phishing-target/`, ver item 17 abaixo para por que precisou ser por
+caminho/URL, não por domínio puro).
+
+`classify_domain_with_gemini` (`plane2_agents/orchestrator.py`) chamava:
+```python
+screenshot_bytes = await page_capture.capture_page_screenshot(target_url, domain)
+```
+passando o campo `domain` (vindo direto de `SuspiciousDomainSignal.domain`
+— `str` sem nenhuma restrição de formato no schema, ver
+`seed_registry.py`) como `target_domain` da trava de navegação
+(`page_capture._domain_lock_router`, compara contra o **hostname** de
+cada requisição de navegação). Em produção real isso nunca quebrou porque
+`domain` sempre chega como hostname puro (CN/SAN de certificado, via
+`ct_listener.py`) — mas **nada no código garantia isso**, era uma
+suposição implícita nunca testada.
+
+Quando o alvo de teste do Stage D precisou de uma URL com path
+(`https://bucket.storage.googleapis.com/malicious.html` — GCS só serve
+`mainPageSuffix` atrás de um Load Balancer com domínio próprio, que não
+temos, ver item 17), a suposição quebrou: `domain` = a URL inteira com
+path, o hostname real da navegação (`bucket.storage.googleapis.com`)
+nunca bate contra essa string completa, e a trava **abortava até a
+navegação inicial legítima** — falso positivo de segurança, não um
+detalhe de teste. Se um payload real algum dia chegasse com `domain`
+contendo um path por qualquer motivo (bug em outro produtor, replay
+malformado), a captura de screenshot pararia de funcionar silenciosamente
+(fail-safe do `page_capture.py` trataria isso como falha de captura, sem
+erro visível) — comportamento errado, mas não catastrófico, por causa do
+fail-safe já existente.
+
+**Corrigido** em `classify_domain_with_gemini`: o parâmetro de trava
+agora vem de `urlparse(target_url).hostname` (a URL efetivamente
+navegada), nunca do campo `domain` cru. `page_capture.py` (incluindo
+`_domain_lock_router`) **não mudou uma linha** — mesma trava, mesma
+função, só quem a chama passa um argumento derivado corretamente. Os 3
+testes existentes (`tests/test_page_capture.py`) continuam passando sem
+nenhuma alteração (confirmado por diff vazio antes de rodar). Teste
+adversarial novo (`tests/test_orchestrator_capture_domain_lock.py`, 3
+casos): URL com path + redirect pra outro host → bloqueia; URL com path +
+navegação no mesmo host → permite; URL sem path (caso de produção hoje) →
+comportamento idêntico ao de antes da correção. Suíte completa: 329→332
+passed, 3 deselected, zero regressão.
+
+## 17. `mainPageSuffix`/website hosting do GCS não funciona sem Load Balancer + domínio próprio (Sprint 2, Stage D, 29/08/2026)
+
+`infra/demo_target_bucket.tf` foi escrito com `website { main_page_suffix
+= "index.html" }`, assumindo (nunca verificado antes de aplicar) que isso
+serviria `index.html` na raiz do bucket via `<bucket>.storage.googleapis.com/`.
+**Não serve.** Confirmado por execução (`curl` real contra o bucket já
+aplicado, com `index.html` de fato presente) e contra a documentação
+oficial ([Cloud Storage — hosting a static website](https://docs.cloud.google.com/storage/docs/hosting-static-website)):
+"without a custom domain and load balancer, users who access your
+top-level site are served an XML document tree containing a list of the
+public objects in your bucket." `mainPageSuffix` só tem efeito atrás de
+um Application Load Balancer com domínio verificado (CNAME) — inacessível
+neste projeto (sem domínio próprio). O bloco `website{}` no `.tf`
+permanece (documentado como inerte, ver comentário no arquivo) em vez de
+removido, para não perder a intenção registrada caso um Load Balancer
+seja adicionado no futuro.
+
+**Resolução aplicada**: alvo público servido por URL de caminho
+(`https://<bucket>.storage.googleapis.com/<arquivo>.html`, funciona sem
+LB nenhum) em vez de domínio puro na raiz — o que expôs o achado do item
+16 acima. Para alternar qual variante o orchestrator classifica, o objeto
+`index.html` do bucket é sobrescrito manualmente antes de cada teste
+(`gcloud storage cp <variante>.html gs://.../index.html`) e acessado via
+`https://<bucket>.storage.googleapis.com/index.html` — path explícito,
+não a raiz "mágica" (que continuaria devolvendo a listagem XML mesmo com
+`index.html` presente, exatamente como descrito acima).
+
+## 18. `domain` com `/` quebra o Firestore (não só o domain-lock) — e a falha é 100% silenciosa (Sprint 2, Stage D, 29/08/2026)
+
+Achado ao rodar o D.1/D.2 de verdade contra o alvo do bucket (URL por
+caminho, ver item 17): publiquei a mensagem real em
+`suspicious-domain-detected` com
+`domain="seu-id-unico-sentinel-demo-target.storage.googleapis.com/index.html"`,
+disparei o `orchestrator-job`, e **nada aconteceu** por 5 minutos — só o
+log de startup (`Orchestrator escutando em ...`), nenhum `CACHE MISS`,
+nenhum erro, nenhum log de qualquer tipo. `num_undelivered_messages` da
+subscription `sub-orchestrator` continuava em 1 o tempo todo -- a
+mensagem nunca foi confirmada (ack), mas também nunca gerou NENHUM sinal
+de falha visível em lugar nenhum (Cloud Logging incluso).
+
+**Causa raiz, reproduzida localmente**:
+```python
+>>> db.collection("investigations").document("bucket.storage.googleapis.com/index.html")
+ValueError: A document must have an even number of path elements
+```
+`google-cloud-firestore` interpreta `/` dentro da string passada a
+`.document()` como SEPARADOR DE CAMINHO (coleção/documento/subcoleção/...),
+não como parte literal do ID. `_get_cached_investigation`/`_save_investigation`
+(`plane2_agents/orchestrator.py`) usam `domain` diretamente como ID de
+documento em `investigations/{domain}` — nunca sanitizado, porque em
+produção real `domain` é sempre um hostname puro (CN/SAN de certificado,
+sem `/`), então isso nunca apareceu antes. Mesma categoria de suposição
+implícita do achado #16 (campo `domain` tratado como "sempre hostname
+puro" em múltiplos lugares do código, nunca validado).
+
+**O que torna isto mais sério que o achado #16**: a falha é
+**completamente silenciosa**. `_handle_pubsub_message._process()`
+(`plane2_agents/orchestrator.py`, linha ~890-898):
+```python
+async def _process() -> None:
+    token = otel_context.attach(extracted_ctx)
+    try:
+        await investigate_domain(domain, matched_brand, agent_manifest, detected_at)
+        message.ack()
+    except Exception:
+        message.nack()
+    finally:
+        otel_context.detach(token)
+```
+`except Exception: message.nack()` -- **sem nenhum `logger.exception`/
+`logger.error` antes do nack**. Uma `ValueError` do Firestore (ou
+QUALQUER outra exceção não prevista em `investigate_domain`) é capturada,
+a mensagem é recusada (nack, Pub/Sub tenta de novo), e **nenhum rastro
+fica em lugar nenhum** -- nem log, nem métrica de erro, nem span marcado
+como falho. Mesma família dos achados #14 (trace/métrica sem IAM) e #15
+(tag mutável): o sistema não avisa que algo deu errado, só fica quieto. A
+diferença aqui é que nem sequer existe uma mensagem de erro para
+descobrir depois -- é preciso reproduzir localmente pra achar a causa.
+
+**Consequência prática para o Stage D**: a estratégia de usar `domain`
+contendo o path do objeto GCS (`bucket/index.html`) não é viável --
+quebra o Firestore, não só a trava de `page_capture.py` (achado #16, já
+corrigido). Isso exige repensar como o alvo público é servido, não só
+mais um ajuste de parâmetro. Opções levantadas, nenhuma aplicada ainda:
+(a) um Cloud Run Service minúsculo servindo os arquivos, que dá um
+hostname público de verdade SEM path (`https://servico-hash.a.run.app`,
+mesmo padrão que `agent-gateway` já usa neste projeto) -- mais alinhado
+com como um domínio real se parece, corrige os achados #16/#18 na raiz em
+vez de contorná-los; (b) Load Balancer + domínio (`nip.io` ou
+equivalente) na frente do bucket GCS -- mais pesado, ainda não
+resolvido. Decisão pendente, não tomada nesta sessão sem aprovação.
+
+**Não corrigido ainda (decisão pendente)**: a falha silenciosa em si
+(`except Exception: message.nack()` sem log) é um problema de robustez
+geral, independente do Stage D -- qualquer exceção inesperada em
+`investigate_domain` (não só esta) desaparece sem rastro hoje. Correção
+mínima proposta (não aplicada): `logger.exception(...)` antes do
+`message.nack()`. Fica registrado para decisão explícita, mesmo padrão
+de outros achados desta sessão que não foram corrigidos sem aprovação.

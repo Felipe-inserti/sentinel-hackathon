@@ -289,5 +289,42 @@ class Settings(BaseSettings):
     ct_fetch_concurrency_min: int = 1
     ct_fetch_concurrency_max: int = 8
 
+    # --- Demo local (gravacao de video, ver docs/DEMO_COMMANDS.md) ---------
+    # Opt-in explicito para apontar `scrape_website()` (orchestrator.py) e
+    # o Playwright do evidence_agent.py a um servidor HTTP local
+    # (`python -m http.server`) em vez do dominio real via HTTPS. Default
+    # False -- Cloud Run em producao NUNCA define esta env var, entao o
+    # caminho real (`https://{domain}`) fica intocado. Existe so para
+    # permitir investigar uma pagina de teste sem hospedar nada
+    # publicamente: com a flag ligada, o dominio investigado (ex:
+    # "localhost") resolve para `http://localhost:{demo_local_http_port}`
+    # no laptop de quem esta gravando.
+    demo_insecure_http: bool = False
+    demo_local_http_port: int = 8000
+
+    # --- DEMO_LIVE_SEND_ALLOWLIST (ver takedown_agent.py) -------------------
+    # Mapa EXPLICITO dominio->email de destino, unico lugar em todo o
+    # codigo onde `DRY_RUN=false` tem permissao de enviar uma notificacao
+    # de verdade -- e mesmo assim so para dominios NESTA lista (ver
+    # `process_takedown_approval`). O endereco de destino vem SEMPRE deste
+    # mapa, controlado por config/codigo -- nunca de RDAP
+    # (`resolve_abuse_contacts`) nem de nenhuma saida do modelo. Mesma
+    # garantia da regra de seguranca #2 do CLAUDE.md ("o LLM nunca escolhe
+    # destinatario"), tornada explicita e mais restrita para este caminho
+    # de demonstracao. Vazio por padrao -- fora da janela de gravacao,
+    # `DRY_RUN=false` continua recusando qualquer dominio (ver
+    # `takedown.py`/`TakedownNotImplementedError`).
+    demo_live_send_allowlist: dict[str, str] = {}
+
+    # Credenciais SMTP usadas SO pelo caminho de demo acima -- nunca lidas
+    # fora de `_send_demo_notification`. Sem senha configurada, o envio
+    # falha de forma auditavel (nunca finge que enviou). Ver
+    # docs/DEMO_COMMANDS.md para o passo a passo de gerar uma senha de app
+    # do Gmail (nunca a senha da conta real).
+    demo_smtp_host: str = "smtp.gmail.com"
+    demo_smtp_port: int = 587
+    demo_smtp_username: str | None = None
+    demo_smtp_password: str | None = None
+
 
 settings = Settings()

@@ -195,3 +195,118 @@ primeira entrega.
   corpus coletado; precisaria rodar `evidence_agent.collect_evidence`
   contra esses 8 domínios primeiro (zero custo de Gemini, é só
   Playwright) antes de poder medir.
+
+## Resultado da validação de recall — MEDIDO, 2026-08-28: recall baixo, Opção B REJEITADA
+
+Rodado antes de qualquer implementação, como pedido explicitamente.
+Corpus: feed completo do PhishTank (`data.phishtank.com/data/online-valid.json`,
+73.717 entradas, sem precisar de API key), filtrado para
+`verified=yes` + `online=yes` e para menção de marca bancária/fintech BR
+(não só nubank/loggi/ifood — também itaú, bradesco, caixa, santander,
+picpay, banco inter, btg pactual, por pedido explícito). Dedup por host.
+Bradesco (298 hosts únicos brutos) capado em 40 amostras aleatórias pra
+não dominar o corpus com um kit só; as demais marcas entraram inteiras.
+**Corpus final: 106 casos confirmados.**
+
+Dois bugs de colisão de string encontrados e corrigidos NA CONSTRUÇÃO do
+corpus, mesma classe do achado "loggin≠Loggi" de `FINDINGS.md` item 10:
+"itaú" apenas removendo caracteres não-alfanuméricos vira "ita" (não
+"itau" — a letra acentuada inteira é descartada, não substituída pela
+base), colidindo com qualquer URL contendo "digital"; e concatenar
+labels de host sem o ponto entre eles cria colisão de fronteira
+(`...maxklog` + `gitbook.io` → contém "loggi" por acidente). Corrigido
+com normalização NFKD (preserva a base da letra) e matching por label/
+segmento, nunca no host+path concatenado inteiro.
+
+**Fetch estático (`requests`, timeout 8s, SEM Playwright — os 4 sinais
+medidos não precisam de browser, ver seção 1 acima; validar com o mesmo
+mecanismo que a produção usaria)**:
+
+| | Contagem | % |
+|---|---|---|
+| Corpus total | 106 | 100% |
+| Site respondeu (fetch OK) | 34 | 32,1% |
+| Fora do ar/erro (ConnectionError 30, HTTP 451/404/403 36, timeout/outros 6) | 72 | 67,9% |
+
+**Por sinal, sobre os 34 que responderam:**
+
+| Sinal | Hits / 34 |
+|---|---|
+| 2. Assets do domínio oficial | **0** |
+| 3. Nome da marca em title/meta | 7 |
+| 4. Campo de senha presente | 5 |
+| 4b. Senha + form cross-origin | 1 |
+| 6. Domínio jovem (RDAP < 7 dias) | 0 (de 102 com dado RDAP) |
+
+**"2 OU 3 OU 4b" (personificação real), sobre os 34 que responderam:
+8/34 = 23,5%.** Sobre o corpus inteiro de 106 (denominador pessimista,
+tratando fora-do-ar como não-detectado): 8/106 = 7,5%.
+
+De revisão manual desses 8: pelo menos 1 é alvo errado
+(`bancointernacion.webcindario.com` mira "Banco Internacional del
+Ecuador", não Banco Inter BR — mesma classe de colisão de substring,
+"bancointernacion" contém "bancointer") e 1 é ambíguo
+(`itau.com.py` pode ser o domínio legítimo do Itaú Paraguai, não um
+clone). Recall "limpo" fica entre 6/34 (17,6%) e 8/34 (23,5%).
+
+**Muito abaixo do limiar de 70% combinado como critério de decisão.
+Opção B (filtro) está REJEITADA por este resultado — não implementada.**
+
+### Causa raiz, não só o número
+
+- **Kits SPA renderizados por JS dominam o corpus que responde.**
+  Inspecionando os "falsos negativos" com fetch OK
+  (`itau-landing.vercel.app`, `leia-santander.vercel.app`,
+  `particulares-netbancosantander.{web,firebaseapp}.app` — Next.js/Nuxt
+  hospedados em Vercel/Firebase): o HTML estático devolvido é só o shell
+  do framework. Título genérico ou decoy (`"Ingresando..."`,
+  `"LikeU"`, `"Netbanco Particulares"` sem marca), nenhum asset da marca
+  oficial, nenhum `<form>`/`<input type=password>` — tudo isso é
+  injetado por JavaScript client-side DEPOIS do carregamento. Grep
+  direto por `"itau.com.br"`/`"santander.com.br"` no HTML bruto desses
+  casos confirma: a string simplesmente não está lá, não é bug do
+  detector. Isto é exatamente a exceção que a seção 1 deste documento já
+  cogitava ("SPA que renderiza o form via JS... cai pra None/sem sinal")
+  — mas a validação mostra que não é exceção rara, é o padrão dominante
+  entre os kits modernos que ainda estão no ar.
+- **Sinal 6 (idade do domínio) ficou estruturalmente cego neste corpus,
+  não por threshold errado.** RDAP resolve pelo domínio APEX
+  (`vercel.app`, `webcindario.com`, `duckdns.org`, `firebaseapp.com`) —
+  a data de registro que ele devolve é de quando a PLATAFORMA de
+  hosting gratuito foi registrada (anos atrás), não de quando o
+  subdomínio do atacante foi criado. Para o padrão de hosting que domina
+  este corpus (hosting/subdomínio gratuito), sinal 6 não tem como
+  funcionar sem uma fonte de "idade do subdomínio" que RDAP não
+  fornece — não é uma questão de recalibrar o limiar de 7 dias.
+- **68% do corpus confirmado já está fora do ar.** Efêmero por natureza
+  do próprio ataque — não é falha de metodologia de validação, mas
+  reduz ainda mais o corpus onde os sinais têm chance de disparar.
+
+### Amostra pequena — mesma honestidade de `FINDINGS.md` item 10
+
+34 casos com fetch OK (8 com sinal) é maior que os 8 do corpus de
+nubank/ifood/loggi de `FINDINGS.md`, mas ainda não sustenta um intervalo
+de confiança apertado. O número reportado (17,6%–23,5%) é uma contagem
+bruta, não uma taxa populacional precisa — mas está longe o suficiente
+do limiar de 70% para não depender dessa precisão: mesmo no limite
+otimista (8/34), a distância pro limiar é grande demais pra ser efeito
+de amostra pequena.
+
+### O que isso significa pra Opção A (enriquecimento, sem filtro)
+
+Esta validação **não invalida a Opção A**. Os sinais que dispararam (title/
+meta, form cross-origin) continuam evidência estrutural real quando
+disparam — só não disparam com frequência suficiente pra servir de
+FILTRO com o recall que a Opção B exigiria. Enriquecer o prompt do
+Gemini com esse dossiê estruturado (quando disponível) continua seguro:
+não reduz volume, não arrisca recall, e melhora a qualidade do veredito
+nos casos em que o fetch estático realmente vê algo.
+
+### Reprodutibilidade
+
+Script de construção do corpus e de medição dos sinais rodados fora do
+repositório (`/tmp/.../scratchpad/build_corpus.py`,
+`run_signals.py` — não são código de produção, não commitados). Dados
+brutos do PhishTank (`online-valid.json`) e resultados
+(`corpus.json`, `signal_results.json`) preservados na mesma pasta de
+scratchpad da sessão que gerou este resultado, não versionados no repo.

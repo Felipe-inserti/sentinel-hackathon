@@ -104,6 +104,11 @@ _COUNTER_NAMES = (
     # DRY_RUN=false sem suporte) -- ver takedown_agent.py::process_takedown_approval.
     "takedown_actions_executed_total",
     "takedown_actions_rejected_total",
+    # DEMO_LIVE_SEND_ALLOWLIST (gravacao de video, ver config.py/
+    # takedown_agent.py::_send_demo_notification) -- so incrementa quando
+    # um e-mail de demo saiu de verdade (SMTP confirmou), nunca em
+    # DRY_RUN nem em dominio fora da allowlist.
+    "demo_live_sends_total",
     # brand_memory.py (Sprint 7, Parte B) -- few-shot injetado por marca.
     # O trade-off explicito pedido no sprint: few-shot melhora precisao mas
     # aumenta tokens de ENTRADA por investigacao, contra a tese de token
@@ -122,6 +127,22 @@ _COUNTER_NAMES = (
     "malicious_confirmed_total",
     "websocket_disconnects_total",
     "websocket_gap_seconds_total",
+    # Sprint multimodal -- split de tokens/custo de ENTRADA por modalidade,
+    # MEDIDO via `usage_metadata.prompt_tokens_details` do Gemini (ver
+    # llm_client.LLMClient._extract_modality_tokens), nunca heuristica.
+    # So incrementados quando uma chamada de fato enviou imagem E a API
+    # devolveu o detalhamento -- tornam visivel o trade-off contra a tese
+    # de token economy do CLAUDE.md, mesmo espirito de
+    # brand_memory_estimated_extra_cost_usd_total.
+    "llm_input_text_tokens_total",
+    "llm_input_image_tokens_total",
+    "llm_input_image_cost_usd_total",
+    # Sprint 2, Stage D -- achado real (ver FINDINGS.md item 18):
+    # `orchestrator.py::_handle_pubsub_message` engolia qualquer excecao
+    # nao prevista em silencio (nack sem log, sem metrica, sem span de
+    # erro). Este contador e o log com stack trace agora sao obrigatorios
+    # no caminho de excecao -- nunca mais silencioso.
+    "investigate_domain_errors_total",
 )
 
 _propagator = TraceContextTextMapPropagator()

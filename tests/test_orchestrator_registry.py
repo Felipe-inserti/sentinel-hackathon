@@ -104,6 +104,54 @@ async def test_handle_pubsub_message_valid_payload_invokes_with_resolved_manifes
     message.nack.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_handle_pubsub_message_logs_and_marks_span_on_unexpected_exception(monkeypatch, caplog):
+    """Regressao -- Sprint 2, Stage D (ver FINDINGS.md item 18): antes
+    desta correcao, uma excecao nao prevista dentro de `investigate_domain`
+    desaparecia em silencio (so um nack, sem log, sem metrica, sem span
+    marcado como erro). Prova os 4 sinais obrigatorios agora: log com
+    stack trace, span.record_exception + status ERROR, contador dedicado,
+    e o nack continua acontecendo (comportamento de retry preservado)."""
+    manifest = _manifest(version="1.0.0")
+    message = _message({"domain": "dominio-que-vai-falhar.com"})
+    loop = asyncio.get_running_loop()
+
+    boom = ValueError("falha inesperada simulada (ex: Firestore rejeitando o ID)")
+    fake_span = MagicMock()
+    fake_span.__enter__ = MagicMock(return_value=fake_span)
+    fake_span.__exit__ = MagicMock(return_value=False)
+    fake_tracer_span_cm = MagicMock(return_value=fake_span)
+
+    fake_increment = MagicMock()
+    monkeypatch.setattr(orch.telemetry, "increment_counter", fake_increment)
+
+    with (
+        patch.object(orch.registry, "invoke_agent", return_value=manifest),
+        patch.object(orch, "investigate_domain", new=AsyncMock(side_effect=boom)),
+        patch.object(orch.tracer, "start_as_current_span", fake_tracer_span_cm),
+        caplog.at_level("ERROR"),
+    ):
+        orch._handle_pubsub_message(message, loop)
+        await asyncio.sleep(0.2)
+
+    # 1. logado com stack trace (logger.exception inclui o traceback)
+    assert any("Falha inesperada processando investigacao" in r.message for r in caplog.records)
+    assert any(r.exc_info is not None for r in caplog.records)
+
+    # 2. span marcado como erro explicitamente
+    fake_span.record_exception.assert_called_once_with(boom)
+    fake_span.set_status.assert_called_once()
+    status_arg = fake_span.set_status.call_args[0][0]
+    assert status_arg.status_code == orch.StatusCode.ERROR
+
+    # 3. metrica dedicada incrementada
+    fake_increment.assert_any_call("investigate_domain_errors_total")
+
+    # 4. nack continua acontecendo (retry preservado, nao regrediu)
+    message.nack.assert_called_once()
+    message.ack.assert_not_called()
+
+
 def test_save_investigation_stamps_agent_id_and_version(monkeypatch):
     fake_db = MagicMock()
     monkeypatch.setattr(orch, "db", fake_db)

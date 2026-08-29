@@ -54,6 +54,17 @@ class LLMUsage:
     input_tokens: int
     output_tokens: int
     latency_ms: float
+    # Split de `input_tokens` por modalidade (Sprint multimodal) -- MEDIDO
+    # de verdade via `usage_metadata.prompt_tokens_details` da resposta do
+    # Gemini (`ModalityTokenCount`, ver google.genai.types), nunca uma
+    # heuristica de caracteres/token (diferente de
+    # `brand_memory.estimate_extra_tokens`, que estima PRE-chamada porque
+    # nao ha resposta ainda para medir). `None` quando a chamada nao
+    # enviou imagem (a maioria dos chamadores -- takedown_agent.py,
+    # eval_triage.py) ou quando a API nao devolveu o detalhamento -- nunca
+    # 0 como valor inventado de "medido e deu zero".
+    input_text_tokens: int | None = None
+    input_image_tokens: int | None = None
 
 
 @dataclass(frozen=True)
@@ -84,6 +95,8 @@ class LLMClient:
         response_schema: type[T],
         *,
         temperature: float = 0.1,
+        image_bytes: bytes | None = None,
+        image_mime_type: str = "image/jpeg",
     ) -> LLMResult[T]:
         """Classifica `untrusted_data` seguindo `system_prompt`, devolvendo
         uma instancia validada de `response_schema` mais os metadados de
@@ -101,6 +114,19 @@ class LLMClient:
         de escape que um atacante poderia mirar mesmo sem conhecer o nonce
         dinamico. `generate()` repassa `untrusted_data` verbatim como
         `contents` da chamada ao modelo.
+
+        `image_bytes` (Sprint multimodal, opcional -- `None` preserva o
+        comportamento anterior byte a byte, ver testes em
+        `test_llm_client.py`): quando fornecido, vira um segundo `Part`
+        (`inline_data`) na MESMA chamada/mesmo turno de usuario que
+        `untrusted_data` -- nao uma segunda requisicao, nao uma camada
+        nova. A imagem e conteudo coletado do mesmo site suspeito, tao
+        adversarial quanto `untrusted_data` -- este metodo nao a
+        sanitiza (nao ha regex para pixel); a defesa fica no PROMPT
+        (tratar texto extraido da imagem como dado, nunca instrucao) e no
+        chamador (re-sanitizar qualquer texto que o modelo devolva
+        DESCREVENDO a imagem antes de persistir, ver
+        `orchestrator.py::_save_investigation`).
         """
         config = genai_types.GenerateContentConfig(
             system_instruction=system_prompt,
@@ -109,10 +135,19 @@ class LLMClient:
             response_schema=response_schema,
         )
 
+        contents: str | list[genai_types.Part]
+        if image_bytes is not None:
+            contents = [
+                genai_types.Part.from_text(text=untrusted_data),
+                genai_types.Part.from_bytes(data=image_bytes, mime_type=image_mime_type),
+            ]
+        else:
+            contents = untrusted_data
+
         schema_attempt = 0
         while True:
             start = time.monotonic()
-            response = await self._call_with_transient_retry(untrusted_data, config)
+            response = await self._call_with_transient_retry(contents, config)
             latency_ms = (time.monotonic() - start) * 1000
 
             usage = self._extract_usage(latency_ms, response)
@@ -142,7 +177,7 @@ class LLMClient:
             )
 
     async def _call_with_transient_retry(
-        self, contents: str, config: genai_types.GenerateContentConfig
+        self, contents: str | list[genai_types.Part], config: genai_types.GenerateContentConfig
     ) -> genai_types.GenerateContentResponse:
         attempt = 0
         while True:
@@ -196,12 +231,37 @@ class LLMClient:
         latency_ms: float, response: genai_types.GenerateContentResponse
     ) -> LLMUsage:
         usage_metadata = response.usage_metadata
+        input_text_tokens, input_image_tokens = LLMClient._extract_modality_tokens(usage_metadata)
         return LLMUsage(
             model_id=settings.gemini_model_id,
             input_tokens=(usage_metadata.prompt_token_count or 0) if usage_metadata else 0,
             output_tokens=(usage_metadata.candidates_token_count or 0) if usage_metadata else 0,
             latency_ms=latency_ms,
+            input_text_tokens=input_text_tokens,
+            input_image_tokens=input_image_tokens,
         )
+
+    @staticmethod
+    def _extract_modality_tokens(usage_metadata) -> tuple[int | None, int | None]:
+        """Le `usage_metadata.prompt_tokens_details` (lista de
+        `ModalityTokenCount`, ver google.genai.types) quando a API
+        devolveu o detalhamento por modalidade -- MEDICAO real, nao
+        heuristica. `getattr` em vez de acesso direto de proposito: testes
+        deste modulo mockam `usage_metadata` como `SimpleNamespace` sem
+        esse campo, e a propria API so preenche `prompt_tokens_details`
+        quando ha mais de uma modalidade na entrada (chamada so-texto pode
+        vir sem ele)."""
+        details = getattr(usage_metadata, "prompt_tokens_details", None) or []
+        text_tokens: int | None = None
+        image_tokens: int | None = None
+        for item in details:
+            modality = getattr(item, "modality", None)
+            token_count = getattr(item, "token_count", None) or 0
+            if modality == genai_types.MediaModality.TEXT:
+                text_tokens = token_count
+            elif modality == genai_types.MediaModality.IMAGE:
+                image_tokens = token_count
+        return text_tokens, image_tokens
 
 
 llm_client = LLMClient()
