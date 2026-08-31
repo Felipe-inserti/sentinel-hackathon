@@ -244,6 +244,39 @@ próximo passo é exatamente esse: endpoint `/readyz` (**não** `/healthz` —
 ver nota abaixo, seção "Testando o agent-gateway") + Service com
 `min-instances=1`, revisado à parte.
 
+### Regra operacional — `-replace` num Cloud Run Job SEMPRE exige um segundo apply para o IAM binding
+
+Aconteceu duas vezes (`takedown-agent-job`, depois `orchestrator-job` —
+ver FINDINGS.md achado #22 para o mecanismo completo): rodar
+`terraform apply -replace=google_cloud_run_v2_job.<worker>` — mesmo
+incluindo `-target` no `google_cloud_run_v2_job_iam_member`
+correspondente NO MESMO apply — deixa o Job recriado **sem nenhum
+binding de IAM**. O plano de um único apply é calculado contra o estado
+ANTES da destruição, então "0 to change" no binding não significa que
+ele vai sobreviver — o Cloud Run não preserva a política de IAM através
+de um destroy+create do Job (recurso novo, `uid` novo).
+
+**Sempre que um `-replace` de `google_cloud_run_v2_job.*` for necessário**
+(ex: forçar a re-resolução de uma tag mutável — achado #15), rode DOIS
+applies, nesta ordem, nunca um só:
+
+```bash
+# 1. Replace do Job
+terraform apply -replace=google_cloud_run_v2_job.<worker> \
+  -target=google_cloud_run_v2_job.<worker> \
+  <resto das -var/-var-file de sempre>
+
+# 2. OBRIGATÓRIO, separado -- restaura o binding de scheduler-sa
+terraform apply \
+  -target=google_cloud_run_v2_job_iam_member.scheduler_invoke_<worker> \
+  <mesmas -var/-var-file>
+
+# 3. Verificação -- nunca confiar em "apply completo com sucesso"
+gcloud run jobs get-iam-policy <worker>-job --project=<PROJECT_ID> --region=<REGION>
+# tem que devolver roles/run.invoker para scheduler-sa@... -- se vier
+# vazio, o passo 2 não rodou ou falhou
+```
+
 ### Uso — `deploy.sh` / `teardown.sh`
 
 ```bash

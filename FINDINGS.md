@@ -759,3 +759,389 @@ geral, independente do Stage D -- qualquer exceção inesperada em
 mínima proposta (não aplicada): `logger.exception(...)` antes do
 `message.nack()`. Fica registrado para decisão explícita, mesmo padrão
 de outros achados desta sessão que não foram corrigidos sem aprovação.
+
+**Atualização (dispatch manual D.1-D.4, 29/08/2026)**: a correção mínima
+proposta acima FOI aplicada, no mesmo commit (`4cc2f48`) que fechou este
+achado -- ver achado #20 abaixo. O texto acima fica como estava escrito no
+momento (histórico do diagnóstico), não editado.
+
+## 19. Imagem `sentinel-orchestrator:latest` em produção está desatualizada -- não tem os achados #16/#18 (dispatch manual D.1-D.4, 29/08/2026)
+
+Descoberto ao publicar as 3 primeiras mensagens de teste do dispatch D.1-D.4
+com `domain` contendo path
+(`sentinel-demo-target-....run.app/malicious.html`, forma que já deveria
+funcionar depois do achado #18 estar corrigido no código): o
+`orchestrator-job` consumiu as mensagens e **travou em silêncio** --
+nenhum log novo por 5+ minutos, as 3 mensagens nunca confirmadas
+(`num_undelivered_messages` parado em 3 o tempo todo). Exatamente o
+sintoma já documentado no achado #18, reproduzido ao vivo.
+
+**Causa raiz confirmada por execução** (não suposição): comparei a imagem
+efetivamente rodando contra o código commitado.
+
+```bash
+gcloud run jobs describe orchestrator-job --project=seu-id-unico --region=us-central1 \
+  --format="value(spec.template.spec.template.spec.containers[0].image)"
+# us-central1-docker.pkg.dev/seu-id-unico/sentinel-images/sentinel-orchestrator:latest
+
+gcloud artifacts docker images list \
+  us-central1-docker.pkg.dev/seu-id-unico/sentinel-images \
+  --include-tags --filter="package:sentinel-orchestrator"
+# CREATE_TIME/UPDATE_TIME: 2026-08-29T00:28:47Z
+# DIGEST: sha256:cd5c1313c323ca98e5fa2683f8b7c1aae7bc0bd69e52b212e9ee0f05277bbd0b
+```
+
+O commit `4cc2f48` (que introduz `Dockerfile.orchestrator`,
+`plane2_agents/page_capture.py`, e as correções dos achados #16/#18) tem
+`AuthorDate: Sat Aug 29 02:30:00 2026 -0300` = **05:30:00 UTC** -- **5
+horas depois** do build da imagem (`00:28:47 UTC`). A imagem em produção
+foi construída a partir de um estado LOCAL intermediário do sprint
+multimodal (já tinha `page_capture.py`/captura de screenshot funcionando
+-- confirmado, os 3 dispatches de teste classificaram com
+`visual_analysis_available=True`), mas **antes** das últimas correções
+terem sido escritas.
+
+**Confirmado por extração direta do código rodando** (sem rebuild --
+`gcloud run jobs execute` com `--args` sobrescrevendo só os args do
+container, comando `python`, para fazer a própria imagem imprimir seus
+arquivos via stdout/Cloud Logging):
+
+```bash
+gcloud run jobs execute orchestrator-job --project=seu-id-unico --region=us-central1 \
+  --args="-c,import pathlib;import sys;sys.stdout.write(pathlib.Path('/app/plane2_agents/orchestrator.py').read_text())" \
+  --async
+# depois: gcloud logging read '...execution_name="<nome>"...' --order=asc
+```
+
+Comparando o dump real (818 linhas) contra `plane2_agents/orchestrator.py`
+do HEAD atual (987 linhas) com `diff -u -B` (ignorando diferenças de linha
+em branco -- o pipe de logging do Cloud Run não preserva linhas vazias
+como entradas distintas), a imagem em produção **não tem** nenhuma das 3
+correções abaixo -- e não tem MAIS NADA além delas (o resto de
+`orchestrator.py`, e `telemetry.py` inteiro exceto um nome de contador, são
+idênticos):
+
+1. `capture_lock_domain = urlparse(target_url).hostname or domain` (achado
+   #16) -- a imagem em produção ainda chama
+   `page_capture.capture_page_screenshot(target_url, domain)` com o campo
+   `domain` cru.
+2. `_firestore_safe_document_id()` (achado #18, parte 1) -- a imagem em
+   produção ainda faz
+   `db.collection(...).document(domain)` direto, sem sanitizar `/`.
+3. O span `pubsub.process_message` + `logger.exception(...)` antes do
+   `message.nack()` (achado #18, parte 2, "log de exceção") -- a imagem em
+   produção ainda tem só
+   `except Exception: message.nack()`, sem log, sem span, sem contador
+   `investigate_domain_errors_total`. **Esta ausência é a causa raiz do
+   achado #20 abaixo** (trace incompleto).
+
+**Ação tomada nesta sessão**: cancelei a execução travada
+(`orchestrator-job-jvr9x`) e descartei (`gcloud pubsub subscriptions pull
+sub-orchestrator --auto-ack`) as 3 mensagens envenenadas -- sem essa
+limpeza elas ficariam re-tentando indefinidamente (`sub-orchestrator` não
+tem dead-letter policy configurada). Contornei o teste publicando `domain`
+sempre como hostname puro (usando `SERVE_AS_ROOT` do
+`sentinel-demo-target` para trocar o conteúdo servido na raiz, em vez de
+usar path na URL) -- funciona contra a imagem antiga sem depender do
+achado #18 estar corrigido nela.
+
+**Rebuild mínimo necessário** (não executado nesta sessão -- só
+diagnóstico, por pedido explícito): rebuild + push da MESMA tag
+(`sentinel-orchestrator:latest`) a partir do `Dockerfile.orchestrator`
+atual + `terraform apply -replace=google_cloud_run_v2_job.orchestrator`
+(necessário por causa do achado #15 -- tag mutável, Terraform não percebe
+sozinho que o conteúdo mudou). Nenhum outro arquivo copiado pela imagem
+(`config.py`, `llm_client.py`, `registry.py`, `sanitizer.py`,
+`brand_agent.py`, `brand_memory.py`, `observation_run.py`,
+`plane1_ingestion/`) diverge do HEAD atual -- confirmado que
+`requirements.txt`/`Dockerfile.orchestrator`/`page_capture.py` não
+mudaram desde o commit que já está na imagem (`git show --stat 4cc2f48`
+mostra os 4 arquivos tocados: `Dockerfile.orchestrator`,
+`plane2_agents/orchestrator.py`, `plane2_agents/page_capture.py`,
+`telemetry.py` -- os dois primeiros criados do zero nesse commit, ou
+seja, já estavam completos quando a imagem foi buildada; só
+`orchestrator.py`/`telemetry.py` têm o delta acima). Escopo do rebuild:
+recompilar a imagem inteira (não há como trocar um arquivo isolado num
+Cloud Run Job), mas o CONTEÚDO que muda de fato é só esse.
+
+## 20. Trace incompleto no Cloud Trace -- regressão causada pela ausência do span `pubsub.process_message` na imagem em produção (dispatch manual D.1-D.4, 29/08/2026)
+
+**Sintoma**: consultando os 3 `trace_id` reais dos dispatches de teste
+(D.1/D.2/D.3, via `curl` contra
+`https://cloudtrace.googleapis.com/v1/projects/seu-id-unico/traces/<id>`,
+inclusive esperando ~2,5min/15 tentativas para descartar atraso de
+propagação) -- cada trace devolve **1 único span** (`llm.analyze`),
+aparecendo como **RAIZ** (`parentSpanId=None`). Os spans
+`pubsub.process_message`, `cache.lookup`, `registry.invoke`,
+`scrape.fetch`, `visual.capture`, `brand_memory.inject`, `sanitize.clean`,
+`firestore.persist` nunca aparecem. Confirmado que não é atraso de
+propagação comparando logs: a linha `CACHE MISS` (deveria estar dentro do
+span pai) não carrega `logging.googleapis.com/trace` nenhum, enquanto as
+linhas do `llm_client`/`httpx` (dentro do span `llm.analyze`) carregam
+corretamente -- ausência sistemática, não atraso.
+
+**Diagnóstico pedido explicitamente ANTES de qualquer correção** -- 4
+hipóteses descartadas por execução real, não suposição:
+
+1. `telemetry.setup()` é chamado no caminho novo? **Sim, nas duas
+   imagens** -- `tracer = telemetry.setup("sentinel-orchestrator")` no
+   nível de módulo de `orchestrator.py` (linha 87 do HEAD atual, linha 73
+   do dump extraído da imagem em produção -- idêntico nas duas).
+2. `extract_context` do Pub/Sub roda? **Sim, nas duas** -- código idêntico
+   em `_handle_pubsub_message`. `extracted_ctx = telemetry.extract_context(message.attributes)`
+   com um carrier vazio (mensagens publicadas via `gcloud pubsub topics
+   publish` não carregam `traceparent`) devolve um `Context()` vazio, por
+   design -- inicia um trace novo, comportamento esperado e documentado
+   no próprio comentário do código.
+3. O exporter é criado antes ou depois dos spans do pipeline? **Não é a
+   causa** -- `_try_build_span_processor()` roda dentro de
+   `telemetry.setup()`, sempre antes de qualquer span do pipeline ser
+   criado (setup é chamado no import do módulo, antes de
+   `run_orchestrator()` processar qualquer mensagem), idêntico nas duas
+   imagens.
+4. Exceção silenciosa no setup de telemetria? **Não** -- `_tracer` fica
+   corretamente populado nas duas imagens (`_JsonTraceFormatter` mostra
+   `logging.googleapis.com/trace` válido nos logs de `llm.analyze` em
+   ambas). `telemetry.py` é idêntico entre as duas imagens exceto pela
+   ausência de um nome de contador (`investigate_domain_errors_total`) na
+   tupla `_COUNTER_NAMES` da imagem antiga -- não afeta tracer/span
+   processor.
+
+**Causa raiz real, confirmada por reprodução direta** (não pela
+comparação de código sozinha): rodei `plane2_agents.orchestrator` LOCAL
+(código do HEAD atual, `.venv`) contra a subscription `sub-orchestrator`
+REAL do projeto, com um `SpanProcessor` de diagnóstico anexado ao
+`TracerProvider` real (registra nome/trace_id/span_id/parent de cada span
+no exato momento em que abre/fecha) -- publiquei uma mensagem real e
+observei. Com o código do HEAD ATUAL, os 9 spans do pipeline (
+`pubsub.process_message` → `cache.lookup` → `scrape.fetch` →
+`visual.capture` → `brand_memory.inject` → `sanitize.clean` →
+`llm.analyze` → `firestore.persist` → `pubsub.publish`) saem **todos com
+o MESMO trace_id, todos com `parent=<span_id de pubsub.process_message>`,
+todos na mesma thread** -- trace completo e corretamente aninhado. (Só
+`registry.invoke`, que roda ANTES de `_process()` na thread do callback do
+Pub/Sub, fica de fora por desenho -- span isolado, comportamento
+documentado e esperado.)
+
+A imagem em produção **não tem o span `pubsub.process_message`** (achado
+#19, item 3): `_process()` chama `investigate_domain(...)` DIRETO, sem
+nenhum `with tracer.start_as_current_span(...)` ao redor. Isso quebra o
+encadeamento inteiro -- sem um span "guarda-chuva" vivo durante toda a
+chamada, CADA `with tracer.start_as_current_span(...)` de nível mais alto
+dentro de `investigate_domain`/`classify_domain_with_gemini`
+(`cache.lookup`, `scrape.fetch`, `visual.capture`, `brand_memory.inject`,
+`sanitize.clean`, `llm.analyze`, `firestore.persist`) abre e FECHA sem
+nenhum pai ativo -- ao fechar, o contexto volta para o `Context()` vazio
+anexado por `otel_context.attach(extracted_ctx)`, não para um span pai. O
+PRÓXIMO span aberto (ex: `scrape.fetch`, depois que `cache.lookup` já
+fechou) não tem mais nada para se pendurar, e vira uma **trace nova e
+isolada, com seu próprio trace_id aleatório**. `llm.analyze` é só o
+último da cadeia a abrir -- por isso aparece como raiz de sua própria
+trace, desconectado de tudo que veio antes. Os outros spans
+(`cache.lookup`, `scrape.fetch` etc.) muito provavelmente TAMBÉM foram
+exportados para o Cloud Trace com sucesso -- só que cada um sob um
+trace_id diferente, nunca capturado nesta sessão (não há como descobri-los
+a posteriori sem uma correlação de log, que também está ausente para
+eles).
+
+**Não é regressão de comportamento nem de outro código** -- é
+consequência direta e integral do achado #19 (imagem desatualizada): o
+span `pubsub.process_message` já existe no código commitado (parte da
+correção "log de exceção" do achado #18), só nunca foi deployado.
+Confirmado que a arquitetura de trace do Stage A (anterior a este sprint,
+rodando `sentinel-agents:latest`, imagem sem o código multimodal) tinha o
+trace completo -- esse worker antigo (`ct_listener.py`) sempre teve um
+span guarda-chuva equivalente ao redor do processamento da mensagem.
+
+**Correção**: nenhuma aplicada nesta sessão (só diagnóstico, por pedido
+explícito). É o MESMO rebuild do achado #19 -- a correção já existe no
+código commitado, só precisa ser deployada.
+
+## 21. `injection-css-generated.html` não isola "só a imagem detecta" -- o que a imagem muda é a QUALIDADE DA EVIDÊNCIA, não o rótulo (dispatch manual D.1-D.4, 29/08/2026)
+
+A intenção documentada no próprio arquivo (`demo/phishing-target/injection-css-generated.html`,
+comentário do CSS) era demonstrar "prova real de 'veredito muda por causa
+da imagem'" -- a hipótese: sem a captura de tela, o payload de injeção
+(`::before{content:...}`, invisível a `BeautifulSoup.stripped_strings`,
+ver achados de validação anteriores) não é visto, e o modelo classificaria
+diferente.
+
+**Testado com o Gemini real** (chamada direta a
+`classify_domain_with_gemini`, mesmo conteúdo, uma vez com a captura de
+tela normal e outra com `page_capture.capture_page_screenshot` forçado a
+devolver `None`):
+
+| | COM imagem | SEM imagem |
+|---|---|---|
+| classification | MALICIOUS | MALICIOUS |
+| confidence | 1.00 | 0.99 |
+| visual_analysis_available | True | False |
+| reasoning cita o payload de injeção? | Sim -- `text_in_image_summary`: "...contendo texto de manipulação direcionado ao analisador..." | Não -- o modelo nunca soube que a tentativa existiu |
+
+**O rótulo não muda.** A página tem marca (`BancoTeste`) + formulário de
+credencial (CPF/senha/código de verificação) visíveis no HTML normal
+(nós de DOM reais, capturados por `stripped_strings` independente da
+imagem) -- sinal suficiente, sozinho, para o Gemini classificar MALICIOUS
+com ou sem a imagem (mesmo padrão de `malicious.html`, que também dá
+MALICIOUS 1.00 e não tem nenhum payload de injeção). A variável "só a
+imagem detecta" não está isolada nesta página -- para isolar de verdade,
+precisaria de uma variante SEM marca/formulário visíveis no HTML, só o
+payload CSS-gerado, e testar se o modelo classifica SAFE sem imagem e
+MALICIOUS com imagem.
+
+**O que a imagem de fato muda, e é real**: a QUALIDADE/especificidade da
+evidência. Sem imagem, o modelo acerta o rótulo por um motivo genérico
+(marca + formulário) sem nunca saber que houve uma tentativa de
+manipulação do próprio analisador. Com imagem, o modelo vê e CITA
+explicitamente o payload de injeção como evidência -- a diferença entre
+"acertar por sorte/heurística geral" e "detectar e neutralizar o ataque
+de verdade", visível no campo `text_in_image_summary` e no `reasoning`.
+Vale mencionar isso com essa precisão em qualquer material de demo -- não
+como "a imagem muda o veredito", que não é o que os dados mostram para
+este arquivo específico.
+
+## 22. Regra operacional: `terraform apply -replace` num Cloud Run Job exige um SEGUNDO apply isolado para restaurar o IAM binding (rebuild do orchestrator-job, 29/08/2026)
+
+Descoberto ao aplicar o rebuild que corrige os achados #16/#18/#19: rodei
+`terraform apply -replace=google_cloud_run_v2_job.orchestrator
+-target=google_cloud_run_v2_job.orchestrator
+-target=google_cloud_run_v2_job_iam_member.scheduler_invoke_orchestrator`
+NUM ÚNICO apply, com os dois `-target` juntos, esperando que o binding de
+IAM saísse correto no final. **Não saiu.** Confirmado por execução
+imediatamente depois:
+
+```bash
+gcloud run jobs get-iam-policy orchestrator-job --project=seu-id-unico --region=us-central1
+# etag: BwZaKbIisQU=   <- SEM bindings nenhum
+
+gcloud run jobs get-iam-policy takedown-agent-job --project=seu-id-unico --region=us-central1
+# bindings: [{ role: roles/run.invoker, members: [scheduler-sa@...] }]  <- correto, referencia
+```
+
+**Mecanismo, agora compreendido** (não só observado -- reproduzido e
+explicado): um `terraform plan`/`apply` calcula TODO o plano de uma vez,
+contra o estado JÁ REFRESCADO no início da chamada -- antes de qualquer
+ação de destroy/create ser executada. Quando o plano inclui tanto o
+`-replace` do Job quanto o `-target` do `google_cloud_run_v2_job_iam_member`
+correspondente, o binding de IAM é avaliado contra o Job **ainda
+existente, com a política antiga intacta** -- por isso o plano mostra "0
+to change" para o binding, mesmo sabendo que o Job vai ser destruído
+poucos segundos depois na mesma execução. O Cloud Run recria o Job do
+zero (novo `uid`, gerado como recurso novo, não um update in-place) e a
+política de IAM não sobrevive à destruição do recurso original -- mas
+Terraform nunca reavalia o binding DEPOIS da recriação, porque isso só
+aconteceria numa chamada de `plan`/`apply` seguinte.
+
+**Confirmado que a correção funciona**: um SEGUNDO `terraform plan
+-target=google_cloud_run_v2_job_iam_member.scheduler_invoke_orchestrator`
+(sozinho, sem `-replace`, DEPOIS do apply que recriou o Job) refrescou o
+estado contra o Job JÁ NOVO e corretamente detectou `1 to add` (binding
+ausente na realidade) -- `terraform apply` desse segundo plano restaurou
+o binding, confirmado de novo por `get-iam-policy` idêntico ao do
+`takedown-agent-job`.
+
+**Esta é a MESMA causa raiz do incidente anterior com `takedown-agent-job`**
+(mencionado em conversa, não documentado por escrito até agora) --
+aconteceu duas vezes porque a causa é estrutural do par
+`google_cloud_run_v2_job` + `google_cloud_run_v2_job_iam_member` como dois
+recursos Terraform separados, não um bug pontual de nenhum dos dois
+sprints.
+
+**Regra operacional, registrada em `infra/README.md`** (seção "Uso —
+`deploy.sh`/`teardown.sh`", ver lá): todo `-replace` de um
+`google_cloud_run_v2_job` (qualquer um dos 4 workers) precisa ser seguido
+por um `terraform apply` SEPARADO, sem `-replace`, alvo (`-target`) no(s)
+`google_cloud_run_v2_job_iam_member` daquele Job -- nunca confiar que
+incluir os dois `-target` no MESMO apply é suficiente. Verificação
+obrigatória depois de qualquer `-replace`: `gcloud run jobs get-iam-policy
+<job> --project=... --region=...` tem que devolver os `bindings`
+esperados, não só "apply completo com sucesso" (mesma família dos achados
+#14/#15/#18 -- o sistema não avisa quando fica sem o binding, só fica
+quieto até o Scheduler tentar invocar e falhar por permissão).
+
+## 23. Documento de cache parcial derruba `investigate_domain` em loop infinito de retry -- `sub-orchestrator` não tem dead-letter policy (30/08/2026, ensaio pré-gravação)
+
+Descoberto ao ensaiar a Cena 1 (publish manual de
+`suspicious-domain-detected` contra `sentinel-demo-target-...run.app`,
+domínio já usado antes para preparar a Cena 3 do vídeo). Toda tentativa
+resultava em:
+
+```
+CACHE HIT para sentinel-demo-target-cugvqtrd7q-uc.a.run.app (economia de 100% de tokens)
+Falha inesperada processando investigacao de ... -- mensagem NACK'd para retry (Pub/Sub)
+```
+
+com dois `trace_id` diferentes confirmados em tentativas sucessivas
+(`eb48dee7a4fa2c8a473bfb7e517a9a45`, `c75fe21c07a89d8ed1bb0f0744fd7283`)
+-- ou seja, não era uma trava presa numa única mensagem, era redelivery
+real e repetido.
+
+### Causa raiz
+
+`investigations/sentinel-demo-target-cugvqtrd7q-uc.a.run.app` já existia
+no Firestore, mas só com os campos `evidence`/`evidence_agent_id`/
+`evidence_agent_version`/`status=PENDING_HUMAN_REVIEW` -- sem
+`classification`/`confidence`. Alguma preparação anterior da Cena 3 (fora
+do caminho normal do orchestrator) escreveu esse documento parcial direto
+no Firestore para deixá-lo pronto para aprovação no dashboard, pulando a
+etapa de classificação. `plane2_agents/orchestrator.py:738` assume que
+todo documento em cache tem `classification`:
+
+```python
+_publish_completed(domain, cached["classification"], cached["confidence"], cache_hit=True)
+```
+
+`cached["classification"]` -> `KeyError` antes mesmo de `_publish_completed`
+rodar (nunca chegou a publicar `investigation-completed` por esse
+caminho). A leitura de cache (`_get_cached_investigation`) não valida que
+o documento tem o schema mínimo esperado antes de tratá-lo como "já
+investigado" -- qualquer documento parcial em `investigations/{domain}`
+(seedado manualmente, ou uma escrita futura que grave campos incompletos
+por qualquer motivo) provoca o mesmo crash.
+
+`sub-orchestrator` não tem `deadLetterPolicy` configurada (confirmado via
+`gcloud pubsub subscriptions describe`) -- só `retryPolicy` (backoff
+10s–60s). Sem DLQ, uma mensagem que sempre falha do mesmo jeito **não sai
+de circulação sozinha**: fica sendo redelivered indefinidamente (o
+processamento em si é barato -- 1 leitura de Firestore por tentativa,
+falha antes de qualquer chamada ao Gemini -- mas é um vazamento de
+"lixo" operacional que só um humano ou um DLQ resolve).
+
+### Correção aplicada nesta sessão (contorno, não a causa raiz)
+
+Para desbloquear o ensaio: apaguei o documento parcial
+(`investigations/sentinel-demo-target-...run.app`) e fiz
+`gcloud pubsub subscriptions seek sub-orchestrator --time=<agora>` para
+descartar a mensagem em loop. Republicar depois disso produziu o fluxo
+completo e correto: `CACHE MISS` -> scraping real -> Gemini
+(`gemini-3.5-flash-lite`, 2892 input / 219 output tokens, US$0,00299025,
+2076ms) -> `MALICIOUS` (confiança 1.0, `credential_form_present=True`,
+`visual_brand_match=True`) -> evidence-collector real (fingerprint de
+infra, análise visual) -> `PENDING_HUMAN_REVIEW`. `trace_id`:
+`eadca04100a6e23ccaa72aff792e8f70`.
+
+### Duas lacunas reais, registradas por decisão explícita para NÃO corrigir agora
+
+Deliberado: sprint aditivo sob pressão de prazo de gravação, correção de
+causa raiz fica para depois.
+
+1. **`_get_cached_investigation`/`investigate_domain` deveriam validar o
+   schema do documento em cache antes de confiar nele** (ex: checar que
+   `classification`/`confidence` existem, tratar ausência como cache
+   miss em vez de deixar o `KeyError` estourar) -- um documento parcial
+   nunca deveria conseguir travar o pipeline inteiro.
+2. **`sub-orchestrator` deveria ter uma `deadLetterPolicy`** (como as
+   outras filas já deveriam considerar) -- sem isso, qualquer mensagem
+   "envenenada" (poison message) circula para sempre em vez de ser
+   isolada para inspeção manual depois de N tentativas.
+
+### Achado adicional, apenas observado: `matched_brand="bancoteste"` não é uma marca seedada
+
+`registry.get_agent` rejeitou `brand-agent-bancoteste` ("nenhuma versão
+ACTIVE") -- só `nubank`/`loggi`/`ifood` estão seedados
+(`seed_brand_agents.py`, ver CLAUDE.md). A investigação seguiu
+normalmente sem contexto de marca (`brand_agent_id=None`), como
+projetado -- mas isso significa que testes com este domínio de demo nunca
+exercitam o caminho de `BrandAgent`/`brand_memory`. Não é bug, é só uma
+lacuna de cobertura do ensaio, registrada para quem for narrar a Cena 1
+saber que o "few-shot de marca" não está em jogo nesta demo específica.

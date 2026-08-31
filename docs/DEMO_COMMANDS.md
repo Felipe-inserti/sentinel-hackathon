@@ -105,26 +105,40 @@ depende do dashboard. Passo manual único (não automatizável, confirmado no
 6. Preencha `ALLOWED_REVIEWER_EMAILS=felipe.inserti@gmail.com` (ou
    `ALLOWED_REVIEWER_DOMAIN`) — sem isso ninguém consegue aprovar nada.
 
-### 0.3 Senha de app do Gmail (para o SMTP da demo)
+### 0.3 Senha de app do Gmail (para o SMTP da demo) — NUNCA no `.env`
+
+**Decisão deliberada (confirmada 2026-08-30, ver gravação da FASE 1):**
+nenhuma variável `DEMO_*` (nem `DEMO_SMTP_*`, nem
+`DEMO_LIVE_SEND_ALLOWLIST`) fica persistida no `.env` do projeto — só
+`DRY_RUN=true` (padrão de sempre) vive lá. Uma versão anterior desta seção
+sugeria persistir `DEMO_SMTP_PASSWORD`/`DEMO_LIVE_SEND_ALLOWLIST` no
+`.env`; isso nunca refletiu o que o projeto realmente faz. O padrão real
+(e o único usado) é passar tudo **inline, só no processo do envio real**,
+exatamente como o `§12.4` já demonstra — o valor existe só durante a vida
+daquele processo Python, nunca gravado em disco.
 
 1. Ative verificação em 2 etapas na conta que vai enviar (se ainda não
    tiver): <https://myaccount.google.com/security>
 2. Em <https://myaccount.google.com/apppasswords>, gere uma senha de app
    nova (nome sugerido: "Sentinel Demo SMTP").
-3. Copie a senha de 16 caracteres (sem espaços) para o `.env`:
+3. Guarde a senha de 16 caracteres (sem espaços) em algum lugar seu (gestor
+   de senhas, nunca em arquivo do repo) — você vai colar na hora, como
+   variável de ambiente do comando único do `§12.4`:
 
 ```bash
-DEMO_SMTP_HOST=smtp.gmail.com
-DEMO_SMTP_PORT=587
-DEMO_SMTP_USERNAME=seu-email@gmail.com
-DEMO_SMTP_PASSWORD=<senha de app, 16 chars>
-DEMO_LIVE_SEND_ALLOWLIST={"demo-teste.sentinel.local": "seu-email@gmail.com"}
+DRY_RUN=false \
+DEMO_LIVE_SEND_ALLOWLIST='{"<dominio-do-demo-target>": "seu-email@gmail.com"}' \
+DEMO_SMTP_HOST=smtp.gmail.com DEMO_SMTP_PORT=587 \
+DEMO_SMTP_USERNAME=seu-email@gmail.com DEMO_SMTP_PASSWORD='<senha de app, 16 chars>' \
+python3 -c "..."   # ver comando completo no §12.4
 ```
 
 `DEMO_LIVE_SEND_ALLOWLIST` é `dict[str, str]` no `config.py`
 (`pydantic-settings`) — via env var precisa ser um JSON válido numa linha
 só, como acima. O domínio na chave tem que bater **exatamente** com o
-domínio que você vai injetar no Pub/Sub no passo 3.
+domínio que você vai injetar no Pub/Sub. Fora deste comando pontual, o
+processo do `takedown_agent.py` roda sempre sem essas variáveis definidas
+— `DRY_RUN=true` (padrão) nunca precisa da allowlist para não enviar nada.
 
 ### 0.4 `/etc/hosts` — mapear o domínio de teste para localhost
 
@@ -414,3 +428,124 @@ Console (mais rápido para mostrar ao vivo no vídeo): Metrics Explorer em
 — busque por `prometheus/llm_invocations_total` (o autocomplete do
 Console já usa o prefixo certo, sem precisar digitar `prometheus.googleapis.com/`
 por completo).
+
+## 12. [PRONTO] — Aquecimento imediatamente ANTES de gravar (arquitetura cloud atual)
+
+Verificado por execução real nesta sessão (Sprint 2, dispatch manual
+D.1-D.5, 29/08/2026) — **substitui a seção 3** para a arquitetura atual
+(`sentinel-demo-target` como Cloud Run Service + os 4 workers como Cloud
+Run Jobs sob demanda, não mais `python -m http.server` local). Cold start
+de um Cloud Run Job real medido nesta sessão: **até 2min31s** do
+`gcloud run jobs execute` até o log `"Orchestrator escutando em ..."`
+aparecer — isso é tempo morto real de vídeo se acontecer DURANTE a
+gravação. A técnica abaixo é rodar esse cold start ANTES de apertar
+"gravar": um Cloud Run Job, uma vez iniciado, fica **escutando
+continuamente** até o timeout/cancelamento — não hiberna entre
+mensagens, ao contrário de um Cloud Run Service. Iniciar 3-5 minutos
+antes garante que a mensagem publicada DURANTE a gravação seja
+processada em segundos (medido: ~2-7s do publish ao `CACHE MISS`, no
+worker já quente).
+
+### 12.1 — Confirme o projeto e o conteúdo servido pelo alvo de demo
+
+```bash
+gcloud config set project seu-id-unico
+gcloud run services describe sentinel-demo-target --project=seu-id-unico --region=us-central1 \
+  --format="value(spec.template.spec.containers[0].env)"
+# SERVE_AS_ROOT deve ser o arquivo do "cold open" do vídeo -- default malicious.html.
+# Para trocar (redeploy rápido, ~40s, MESMA imagem/digest):
+gcloud run services update sentinel-demo-target --project=seu-id-unico --region=us-central1 \
+  --update-env-vars=SERVE_AS_ROOT=malicious.html --quiet
+```
+
+### 12.2 — Dispare os 3 workers relevantes, ANTES de gravar (`--async`, NÃO espera)
+
+`ct-listener-job` fica de fora — consome o feed público real do
+certstream, não faz parte do fluxo de dispatch manual da demo.
+
+```bash
+gcloud run jobs execute orchestrator-job        --project=seu-id-unico --region=us-central1 --async
+gcloud run jobs execute evidence-collector-job  --project=seu-id-unico --region=us-central1 --async
+gcloud run jobs execute takedown-agent-job      --project=seu-id-unico --region=us-central1 --async
+```
+
+### 12.3 — Confirme que os 3 estão realmente escutando (não só "iniciado")
+
+Espere até ver os 3 logs abaixo — só então comece a gravar. Sem esse
+check, um `--async` que ainda está em cold start silenciosamente perde a
+mensagem publicada durante a gravação (fica pendurada até o timeout do
+Job, não reprocessa magicamente mais rápido).
+
+```bash
+gcloud logging read '
+  resource.type="cloud_run_job"
+  resource.labels.job_name=("orchestrator-job" OR "evidence-collector-job" OR "takedown-agent-job")
+  textPayload:"escutando em"
+' --project=seu-id-unico --freshness=5m --order=desc \
+  --format="value(resource.labels.job_name,textPayload)" --limit=3
+```
+Espera 3 linhas, uma por worker: `"Orchestrator escutando em .../sub-orchestrator"`,
+`"Evidence collector escutando em .../sub-evidence"`,
+`"Takedown agent escutando em .../sub-takedown (DRY_RUN=True)"`.
+
+### 12.4 — Grave. O gatilho da cena é só isto (processado em segundos, workers já quentes)
+
+```bash
+gcloud pubsub topics publish suspicious-domain-detected --project=seu-id-unico \
+  --message='{"domain": "sentinel-demo-target-433113110183.us-central1.run.app", "matched_brand": "bancoteste"}'
+```
+Sem `/` no `domain` — usa `SERVE_AS_ROOT` (12.1) para trocar qual
+arquivo é classificado, nunca path na URL (achado #18: `domain` com `/`
+quebra o ID do documento Firestore, mesmo já corrigido no código —
+manter o hábito evita depender dessa correção estar deployada).
+
+Para aprovar e ver o e-mail de demo ir embora de verdade (repete D.5,
+`DRY_RUN=false` só nesse processo, nunca no `.env`/Job persistente —
+regra #3 do CLAUDE.md):
+```bash
+DRY_RUN=false \
+DEMO_LIVE_SEND_ALLOWLIST='{"sentinel-demo-target-433113110183.us-central1.run.app": "felipe.inserti@gmail.com"}' \
+DEMO_SMTP_HOST=smtp.gmail.com DEMO_SMTP_PORT=587 \
+DEMO_SMTP_USERNAME=felipe.inserti@gmail.com DEMO_SMTP_PASSWORD='<senha de app, 16 chars>' \
+python3 -c "
+import asyncio
+from datetime import datetime, timezone
+import registry, takedown_agent as ta
+
+async def main():
+    manifest = registry.AgentManifest(
+        agent_id='takedown-agent', version='1.0.0', owner_team='sentinel-response',
+        description='demo', input_schema={'type':'object'}, output_schema={'type':'object'},
+        tools_allowed=[], required_permissions=[], sla_seconds=5.0,
+        status=registry.AgentStatus.ACTIVE, created_at=datetime.now(timezone.utc),
+    )
+    out = await ta.process_takedown_approval(
+        'sentinel-demo-target-433113110183.us-central1.run.app', manifest
+    )
+    print('sent=', out.sent, 'dry_run=', out.dry_run)
+
+asyncio.run(main())
+"
+```
+Isso só funciona se `investigations/<domínio>` já tiver
+`status=TAKEDOWN_APPROVED` (aprovação real via dashboard, ou simulada —
+ver `demo_run_multimodal_flow.py`) — precisa rodar DEPOIS do 12.4 e da
+aprovação, não antes.
+
+### 12.5 — Depois de gravar: cancele os 3, confirme Scheduler ainda PAUSED
+
+```bash
+for J in orchestrator-job evidence-collector-job takedown-agent-job; do
+  EXEC=$(gcloud run jobs executions list --job=$J --project=seu-id-unico --region=us-central1 \
+    --format="value(name)" --limit=1 --sort-by="~startTime")
+  gcloud run jobs executions cancel "$EXEC" --project=seu-id-unico --region=us-central1 --quiet
+done
+
+gcloud scheduler jobs list --project=seu-id-unico --location=us-central1 --format="table(name,state)"
+# os 4 tem que estar PAUSED -- se algum vier ENABLED, `gcloud scheduler jobs pause <nome> --location=us-central1`
+```
+
+**Nunca deixe DRY_RUN=false rodando entre takes** -- o comando do passo
+12.4 é um processo Python que roda uma vez e termina sozinho (não fica
+"ligado"), mas se algo interromper o script no meio, mate o processo
+(`Ctrl+C`) antes de continuar mexendo no projeto.
